@@ -52,6 +52,7 @@ jobs:
           cp $HOME/armmxe-shared/usr/armv7-w64-mingw32/bin/libssp-0.dll ClassiCube
           cp $HOME/armmxe-shared/usr/armv7-w64-mingw32/bin/libunwind.dll ClassiCube
           cp $HOME/armmxe-shared/usr/armv7-w64-mingw32/bin/libwinpthread-1.dll ClassiCube
+          cd ${{ github.workspace }}
           
       # Get short SHA
       - name: Get Short SHA
@@ -61,8 +62,8 @@ jobs:
       - name: Create ZIP with Release
         uses: vimtor/action-zip@v1
         with:
-          files: ${{ github.workspace }}/release/
-          dest: ${{ github.workspace }}/ClassiCube-${{ env.SHORT_SHA }}.zip
+          files: release/
+          dest: ClassiCube-${{ env.SHORT_SHA }}.zip
       
       # Create release
       - name: Create Release
@@ -84,6 +85,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/ClassiCube-${{ env.SHORT_SHA }}.zip
+          asset_path: ClassiCube-${{ env.SHORT_SHA }}.zip
           asset_name: ClassiCube-${{ env.SHORT_SHA }}.zip
           asset_content_type: application/zip
