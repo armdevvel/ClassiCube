@@ -4,7 +4,7 @@ on: [push, pull_request, workflow_dispatch]
 
 jobs:
   build_on_ubuntu:
-    name: Build ${{ matrix.config.plat }} (${{ matrix.config.arch }}${{ matrix.config.bits }}) on Ubuntu
+    name: Cross Compile for ${{ matrix.config.plat }} (${{ matrix.config.arch }}${{ matrix.config.bits }}) on Ubuntu
     runs-on: ubuntu-latest
 
     strategy:
@@ -22,20 +22,23 @@ jobs:
             sudo apt-get -y update \
             && sudo apt-get -y install autoconf automake autopoint bash bison bzip2 flex g++ g++-multilib gettext git gperf intltool libc6-dev-i386 libgdk-pixbuf2.0-dev libltdl-dev libgl-dev libssl-dev libtool-bin libxml-parser-perl lzip make openssl p7zip-full patch perl python3 python3-mako python3-pkg-resources ruby sed unzip wget xz-utils
 
-      - name: Set up ARM32 MXE
+      - name: Set Up ARM32 MXE
         run: |
-          cd ~
+          cd $HOME
           git clone https://github.com/armdevvel/mxe-SHARED --depth 1 armmxe-shared
           cd armmxe-shared
-          export PATH=$HOME/armmxe-shared:$PATH
           make DFEAULT_MAX_JOBS=8 llvm-mingw
+
+      # Build pre-requisites
+      - name: Add ARM32 MXE to PATH
+        run: |
+          echo $HOME/armmxe-shared >> $GITHUB_PATH
 
       # Build
       - name: Build ClassiCube for ${{ matrix.config.plat }} (${{ matrix.config.arch }}${{ matrix.config.bits }})
         run: |
           cd ${{ github.workspace }}
           cd src
-          export PATH=$HOME/armmxe-shared:$PATH
           make mingw CC="armv7-w64-mingw32-gcc"
 
       # Set up folder for release
@@ -51,7 +54,7 @@ jobs:
           cp $HOME/armmxe-shared/usr/armv7-w64-mingw32/bin/libwinpthread-1.dll ClassiCube
           
       # Get short SHA
-      - name: Get short SHA
+      - name: Get Short SHA
         run: echo "SHORT_SHA=`git rev-parse --short HEAD`" >> $GITHUB_ENV
           
       # Create release ZIP
