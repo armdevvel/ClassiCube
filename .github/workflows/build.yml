@@ -32,7 +32,7 @@ jobs:
       # Build pre-requisites
       - name: Add ARM32 MXE to PATH
         run: |
-          echo $HOME/armmxe-shared >> $GITHUB_PATH
+          echo "${HOME}/armmxe-shared/usr/bin" >> $GITHUB_PATH
 
       # Build
       - name: Build ClassiCube for ${{ matrix.config.plat }} (${{ matrix.config.arch }}${{ matrix.config.bits }})
