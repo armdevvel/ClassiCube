@@ -57,11 +57,11 @@ jobs:
       - name: Get Short SHA
         run: echo "SHORT_SHA=`git rev-parse --short HEAD`" >> $GITHUB_ENV
           
-      # Create release ZIP
-      - name: Create Release ZIP
+      # Create ZIP
+      - name: Create ZIP with Release
         uses: vimtor/action-zip@v1
         with:
-          files: ${{ github.workspace }}/release
+          files: ${{ github.workspace }}/release/
           dest: ${{ github.workspace }}/ClassiCube-${{ env.SHORT_SHA }}.zip
       
       # Create release
