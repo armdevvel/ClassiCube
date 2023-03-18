@@ -1,12 +1,11 @@
 #ifndef CC_OPTIONS_H
 #define CC_OPTIONS_H
 #include "Core.h"
-/* Manages loading and saving options.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+/* 
+Manages loading and saving options
+Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 
-#define OPT_USE_MUSIC "usemusic"
-#define OPT_USE_SOUND "usesound"
 #define OPT_MUSIC_VOLUME "musicvolume"
 #define OPT_SOUND_VOLUME "soundsvolume"
 #define OPT_FORCE_OPENAL "forceopenal"
@@ -20,7 +19,6 @@
 #define OPT_SENSITIVITY "mousesensitivity"
 #define OPT_FPS_LIMIT "fpslimit"
 #define OPT_DEFAULT_TEX_PACK "defaulttexpack"
-#define OPT_AUTO_CLOSE_LAUNCHER "autocloselauncher"
 #define OPT_VIEW_BOBBING "viewbobbing"
 #define OPT_ENTITY_SHADOW "entityshadow"
 #define OPT_RENDER_TYPE "normal"
@@ -54,6 +52,7 @@
 #define OPT_FONT_NAME "gui-fontname"
 #define OPT_BLACK_TEXT "gui-blacktextshadows"
 
+#define OPT_LANDSCAPE_MODE "landscape-mode"
 #define OPT_CLASSIC_MODE "mode-classic"
 #define OPT_CUSTOM_BLOCKS "nostalgia-customblocks"
 #define OPT_CPE "nostalgia-usecpe"
@@ -65,6 +64,7 @@
 #define OPT_CLASSIC_HACKS "nostalgia-hacks"
 #define OPT_CLASSIC_ARM_MODEL "nostalgia-classicarm"
 #define OPT_CLASSIC_CHAT "nostalgia-classicchat"
+#define OPT_CLASSIC_INVENTORY "nostalgia-classicinventory"
 #define OPT_MAX_CHUNK_UPDATES "gfx-maxchunkupdates"
 #define OPT_CAMERA_MASS "cameramass"
 #define OPT_CAMERA_SMOOTH "camera-smooth"
@@ -72,11 +72,18 @@
 #define OPT_TOUCH_BUTTONS "gui-touchbuttons"
 #define OPT_TOUCH_SCALE "gui-touchscale"
 #define OPT_HTTP_ONLY "http-no-https"
+#define OPT_HTTPS_VERIFY "https-verify"
+#define OPT_SKIN_SERVER "http-skinserver"
 #define OPT_RAW_INPUT "win-raw-input"
+#define OPT_DPI_SCALING "win-dpi-scaling"
+#define OPT_GAME_VERSION "game-version"
 
 #define LOPT_SESSION  "launcher-session"
 #define LOPT_USERNAME "launcher-cc-username"
 #define LOPT_PASSWORD "launcher-cc-password"
+
+#define LOPT_AUTO_CLOSE "autocloselauncher"
+#define LOPT_SHOW_EMPTY "launcher-show-empty"
 
 #define ROPT_SERVER "launcher-server"
 #define ROPT_USER   "launcher-username"
@@ -98,6 +105,9 @@ void Options_Load(void);
 CC_API void Options_Reload(void);
 /* Saves options to disc, if any were changed via Options_SetXYZ since last save. */
 CC_API void Options_SaveIfChanged(void);
+/* Temporarily prevents saving options until Options_SaveIfChanged is called */
+/*  NOTE: Only makes a difference for web/Android/iOS versions */
+void Options_PauseSaving(void);
 
 /* Sets value to value of option directly in Options.Buffer if found, String_Empty if not. */
 /* Returns whether the option was actually found. */

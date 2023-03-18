@@ -11,7 +11,7 @@ For example, let's assume our site is setup like this:
 * `example.com/static/default.zip`
 
 For simplicitly,
-1) Download `cs.classicube.net/c_client/latest/ClassiCube.js`, then upload it to `static/classisphere.js` on the webserver
+1) Download `cs.classicube.net/client/latest/ClassiCube.js`, then upload it to `static/classisphere.js` on the webserver
 2) Download `classicube.net/static/default.zip`, then upload it to `static/default.zip` on the webserver
 
 The play.html page is the trickiest part, because how to implement this is website-specific. (depends on how your website is styled, what webserver you use, what programming language is used to generate the html, etc)
@@ -26,19 +26,8 @@ You are required to have this HTML code somewhere in the page:
 <span id="logmsg"></span>
 
 <script type='text/javascript'>
-  // need to load IndexedDB before running the game
-  function preloadIndexedDB() {
-    addRunDependency('load-idb');
-    FS.mkdir('/classicube');
-    FS.mount(IDBFS, {}, '/classicube');
-    FS.syncfs(true, function(err) {
-        if (err) window.cc_idbErr = err;
-        removeRunDependency('load-idb');
-    })
-  }
-  
   var Module = {
-    preRun: [ preloadIndexedDB ],
+    preRun: [],
     postRun: [],
     arguments: [ {username}, {mppass}, {server ip}, {server port} ],
     print: function(text) {
@@ -81,7 +70,7 @@ You are required to have this HTML code somewhere in the page:
 
 ### Complete example
 
-The links below show implementing a simple website that hosts the web client
+The links below show how to integrate the webclient into a simple website
 * [Flask (python webserver)](hosting-flask.md)
 
 ### iOS / Android support

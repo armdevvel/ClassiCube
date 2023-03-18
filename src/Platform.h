@@ -1,8 +1,9 @@
 #ifndef CC_PLATFORM_H
 #define CC_PLATFORM_H
 #include "Core.h"
-/* Abstracts platform specific memory management, I/O, etc.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+/* 
+Abstracts platform specific memory management, I/O, etc
+Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 struct DateTime;
 
@@ -21,6 +22,7 @@ typedef int cc_file;
 #define UPDATE_FILE "ClassiCube.update"
 
 /* Origin points for when seeking in a file. */
+/*  NOTE: These have same values as SEEK_SET/SEEK_CUR/SEEK_END, do not change them */
 enum File_SeekFrom { FILE_SEEKFROM_BEGIN, FILE_SEEKFROM_CURRENT, FILE_SEEKFROM_END };
 /* Number of milliseconds since 01/01/0001 to start of unix time. */
 #define UNIX_EPOCH 62135596800000ULL
@@ -37,6 +39,7 @@ extern const cc_result ReturnCode_DirectoryExists;
 int Platform_EncodeUtf16(void* data, const cc_string* src);
 /* Converts a null terminated WCHAR* to char* in-place */
 void Platform_Utf16ToAnsi(void* data);
+cc_bool Platform_DescribeErrorExt(cc_result res, cc_string* dst, void* lib);
 #else
 /* Encodes a string in UTF8 format, also null terminating the string. */
 /* Returns the number of bytes written, excluding trailing NULL terminator. */
@@ -60,18 +63,26 @@ cc_result Platform_Decrypt(const void* data, int len, cc_string* dst);
 /* NOTE: This is for general functions like file I/O. If a more specific 
 describe exists (e.g. Http_DescribeError), that should be preferred. */
 cc_bool Platform_DescribeError(cc_result res, cc_string* dst);
-cc_bool Platform_DescribeErrorExt(cc_result res, cc_string* dst, void* lib);
 
 /* Starts the game with the given arguments. */
-CC_API cc_result Process_StartGame(const cc_string* args);
+CC_API cc_result Process_StartGame2(const cc_string* args, int numArgs);
 /* Terminates the process with the given return code. */
 CC_API void Process_Exit(cc_result code);
 /* Starts the platform-specific program to open the given url or filename. */
 /* For example, provide a http:// url to open a website in the user's web browser. */
 CC_API cc_result Process_StartOpen(const cc_string* args);
 
-extern const char* const Updater_D3D9;
-extern const char* const Updater_OGL;
+struct UpdaterBuild { 
+	const char* name; 
+	const char* path; 
+};
+extern const struct UpdaterInfo {
+	const char* info;
+	/* Number of compiled builds available for this platform */
+	int numBuilds;
+	/* Metadata for the compiled builds available for this platform */
+	const struct UpdaterBuild builds[2]; // TODO name and path
+} Updater_Info;
 /* Attempts to clean up any leftover files from an update */
 cc_bool Updater_Clean(void);
 /* Starts the platform-specific method to update then start the game using the UPDATE_FILE file. */
@@ -108,7 +119,7 @@ CC_API cc_result DynamicLib_Get(void* lib, const char* name, void** symbol); /* 
 struct DynamicLibSym { const char* name; void** symAddr; };
 /* Loads all symbols using DynamicLib_Get2 in the given list */
 /* Returns true if all symbols were successfully retrieved */
-cc_bool DynamicLib_GetAll(void* lib, const struct DynamicLibSym* syms, int count);
+cc_bool DynamicLib_LoadAll(const cc_string* path, const struct DynamicLibSym* syms, int count, void** lib);
 
 /* Allocates a block of memory, with undetermined contents. Returns NULL on allocation failure. */
 CC_API void* Mem_TryAlloc(cc_uint32 numElems, cc_uint32 elemsSize);
@@ -156,11 +167,12 @@ int Stopwatch_ElapsedMS(cc_uint64 beg, cc_uint64 end);
 /* Attempts to create a new directory. */
 CC_API cc_result Directory_Create(const cc_string* path);
 /* Callback function invoked for each file found. */
-typedef void Directory_EnumCallback(const cc_string* filename, void* obj);
+typedef void (*Directory_EnumCallback)(const cc_string* filename, void* obj);
 /* Invokes a callback function on all filenames in the given directory (and its sub-directories) */
 CC_API cc_result Directory_Enum(const cc_string* path, void* obj, Directory_EnumCallback callback);
 /* Returns non-zero if the given file exists. */
 CC_API int File_Exists(const cc_string* path);
+void Directory_GetCachePath(cc_string* path);
 
 /* Attempts to create a new (or overwrite) file for writing. */
 /* NOTE: If the file already exists, its contents are discarded. */
@@ -182,12 +194,15 @@ cc_result File_Position(cc_file file, cc_uint32* pos);
 /* Attempts to retrieve the length of the given file. */
 cc_result File_Length(cc_file file, cc_uint32* len);
 
+typedef void (*Thread_StartFunc)(void);
 /* Blocks the current thread for the given number of milliseconds. */
 CC_API void Thread_Sleep(cc_uint32 milliseconds);
-typedef void (*Thread_StartFunc)(void);
-/* Starts a new thread and then runs the given function in that thread. */
+/* Initialises a new thread that will run the given function. */
+/* Because of backend differences, func must also be provided in Thread_Start2 */
+CC_API void* Thread_Create(Thread_StartFunc func);
+/* Starts a new thread that runs the given function. */
 /* NOTE: Threads must either be detached or joined, otherwise data leaks. */
-CC_API void* Thread_Start(Thread_StartFunc func);
+CC_API void Thread_Start2(void* handle, Thread_StartFunc func);
 /* Frees the platform specific persistent data associated with the thread. */
 /* NOTE: Once a thread has been detached, Thread_Join can no longer be used. */
 CC_API void Thread_Detach(void* handle);
@@ -218,35 +233,41 @@ CC_API void  Waitable_WaitFor(void* handle, cc_uint32 milliseconds);
 /* Calls SysFonts_Register on each font that is available on this platform. */
 void Platform_LoadSysFonts(void);
 
-/* Returns how much data is available to be read from the given socket. */
-CC_API cc_result Socket_Available(cc_socket s, int* available);
-/* Returns (and resets) the last error generated by the given socket. */
-CC_API cc_result Socket_GetError(cc_socket s, cc_result* result);
+/* Checks if the given socket is currently readable (i.e. has data available to read) */
+/* NOTE: A closed socket is also considered readable */
+cc_result Socket_CheckReadable(cc_socket s, cc_bool* readable);
+/* Checks if the given socket is currently writable (i.e. has finished connecting) */
+cc_result Socket_CheckWritable(cc_socket s, cc_bool* writable);
 /* Returns non-zero if the given address is valid for a socket to connect to */
-CC_API int Socket_ValidAddress(const cc_string* address);
+int Socket_ValidAddress(const cc_string* address);
 
 /* Allocates a new non-blocking socket and then begins connecting to the given address:port. */
-CC_API cc_result Socket_Connect(cc_socket* s, const cc_string* address, int port);
+cc_result Socket_Connect(cc_socket* s, const cc_string* address, int port);
 /* Attempts to read data from the given socket. */
-CC_API cc_result Socket_Read(cc_socket s, cc_uint8* data, cc_uint32 count, cc_uint32* modified);
+/* NOTE: A closed socket may set modified to 0, but still return 'success' (i.e. 0) */
+cc_result Socket_Read(cc_socket s, cc_uint8* data, cc_uint32 count, cc_uint32* modified);
 /* Attempts to write data to the given socket. */
-CC_API cc_result Socket_Write(cc_socket s, const cc_uint8* data, cc_uint32 count, cc_uint32* modified);
+cc_result Socket_Write(cc_socket s, const cc_uint8* data, cc_uint32 count, cc_uint32* modified);
 /* Attempts to close the given socket. */
-CC_API cc_result Socket_Close(cc_socket s);
-/* Attempts to poll the given socket for readability or writability. */
-/* NOTE: A closed socket is still considered readable. */
-/* NOTE: A socket is considered writable once it has finished connecting. */
-CC_API cc_result Socket_Poll(cc_socket s, int mode, cc_bool* success);
+void Socket_Close(cc_socket s);
+
+#ifdef CC_BUILD_MOBILE
+void Platform_ShareScreenshot(const cc_string* filename);
+#endif
 
 #ifdef CC_BUILD_ANDROID
 #include <jni.h>
 extern jclass  App_Class;
 extern jobject App_Instance;
 extern JavaVM* VM_Ptr;
+void Platform_TryLogJavaError(void);
 
-#define JavaGetCurrentEnv(env) (*VM_Ptr)->AttachCurrentThread(VM_Ptr, &env, NULL);
-#define JavaMakeConst(env, str) (*env)->NewStringUTF(env, str);
+#define JavaGetCurrentEnv(env) (*VM_Ptr)->AttachCurrentThread(VM_Ptr, &env, NULL)
+#define JavaMakeConst(env, str) (*env)->NewStringUTF(env, str)
+
 #define JavaRegisterNatives(env, methods) (*env)->RegisterNatives(env, App_Class, methods, Array_Elems(methods));
+#define JavaGetIMethod(env, name, sig) (*env)->GetMethodID(env, App_Class, name, sig)
+#define JavaGetSMethod(env, name, sig) (*env)->GetStaticMethodID(env, App_Class, name, sig)
 
 /* Creates a string from the given java string. buffer must be at least NATIVE_STR_LEN long. */
 /* NOTE: Don't forget to call env->ReleaseStringUTFChars. Only works with ASCII strings. */
@@ -258,11 +279,7 @@ jbyteArray JavaMakeBytes(JNIEnv* env, const void* src, cc_uint32 len);
 /* Calls a method in the activity class that returns nothing. */
 void JavaCallVoid(JNIEnv*  env, const char* name, const char* sig, jvalue* args);
 /* Calls a method in the activity class that returns a jint. */
-jint JavaCallInt(JNIEnv*   env, const char* name, const char* sig, jvalue* args);
-/* Calls a method in the activity class that returns a jint. */
 jlong JavaCallLong(JNIEnv* env, const char* name, const char* sig, jvalue* args);
-/* Calls a method in the activity class that returns a jint. */
-jfloat JavaCallFloat(JNIEnv*  env, const char* name, const char* sig, jvalue* args);
 /* Calls a method in the activity class that returns a jobject. */
 jobject JavaCallObject(JNIEnv* env, const char* name, const char* sig, jvalue* args);
 /* Calls a method in the activity class that takes a string and returns nothing. */
@@ -271,5 +288,27 @@ void JavaCall_String_Void(const char* name, const cc_string* value);
 void JavaCall_Void_String(const char* name, cc_string* dst);
 /* Calls a method in the activity class that takes a string and returns a string. */
 void JavaCall_String_String(const char* name, const cc_string* arg, cc_string* dst);
+
+/* Calls an instance method in the activity class that returns nothing */
+#define JavaICall_Void(env, method, args) (*env)->CallVoidMethodA(env,  App_Instance, method, args)
+/* Calls an instance method in the activity class that returns a jint */
+#define JavaICall_Int(env,  method, args) (*env)->CallIntMethodA(env,   App_Instance, method, args)
+/* Calls an instance method in the activity class that returns a jlong */
+#define JavaICall_Long(env, method, args) (*env)->CallLongMethodA(env,  App_Instance, method, args)
+/* Calls an instance method in the activity class that returns a jfloat */
+#define JavaICall_Float(env,method, args) (*env)->CallFloatMethodA(env, App_Instance, method, args)
+/* Calls an instance method in the activity class that returns a jobject */
+#define JavaICall_Obj(env,  method, args) (*env)->CallObjectMethodA(env,App_Instance, method, args)
+
+/* Calls a static method in the activity class that returns nothing */
+#define JavaSCall_Void(env, method, args) (*env)->CallStaticVoidMethodA(env,  App_Class, method, args)
+/* Calls a static method in the activity class that returns a jint */
+#define JavaSCall_Int(env,  method, args) (*env)->CallStaticIntMethodA(env,   App_Class, method, args)
+/* Calls a static method in the activity class that returns a jlong */
+#define JavaSCall_Long(env, method, args) (*env)->CallStaticLongMethodA(env,  App_Class, method, args)
+/* Calls a static method in the activity class that returns a jfloat */
+#define JavaSCall_Float(env,method, args) (*env)->CallStaticFloatMethodA(env, App_Class, method, args)
+/* Calls a static method in the activity class that returns a jobject */
+#define JavaSCall_Obj(env,  method, args) (*env)->CallStaticObjectMethodA(env,App_Class, method, args)
 #endif
 #endif

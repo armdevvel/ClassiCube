@@ -315,6 +315,21 @@
     <ClInclude Include="_PlatformBase.h">
       <Filter>Header Files\Platform</Filter>
     </ClInclude>
+    <ClInclude Include="LBackend.h">
+      <Filter>Header Files\Launcher</Filter>
+    </ClInclude>
+    <ClInclude Include="_GraphicsBase.h">
+      <Filter>Header Files\Graphics</Filter>
+    </ClInclude>
+    <ClInclude Include="_HttpBase.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="_WindowBase.h">
+      <Filter>Header Files\Platform</Filter>
+    </ClInclude>
+    <ClInclude Include="_GLShared.h">
+      <Filter>Header Files\Graphics</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="String.c">
@@ -473,9 +488,6 @@
     <ClCompile Include="_psmodule.c">
       <Filter>Source Files\Freetype</Filter>
     </ClCompile>
-    <ClCompile Include="_raster.c">
-      <Filter>Source Files\Freetype</Filter>
-    </ClCompile>
     <ClCompile Include="_sfnt.c">
       <Filter>Source Files\Freetype</Filter>
     </ClCompile>
@@ -485,14 +497,8 @@
     <ClCompile Include="_type1.c">
       <Filter>Source Files\Freetype</Filter>
     </ClCompile>
-    <ClCompile Include="_type1cid.c">
-      <Filter>Source Files\Freetype</Filter>
-    </ClCompile>
     <ClCompile Include="_truetype.c">
       <Filter>Source Files\Freetype</Filter>
-    </ClCompile>
-    <ClCompile Include="Window.c">
-      <Filter>Source Files\Platform</Filter>
     </ClCompile>
     <ClCompile Include="Launcher.c">
       <Filter>Source Files\Launcher</Filter>
@@ -515,9 +521,6 @@
     <ClCompile Include="Logger.c">
       <Filter>Source Files\Platform</Filter>
     </ClCompile>
-    <ClCompile Include="Http.c">
-      <Filter>Source Files\Network</Filter>
-    </ClCompile>
     <ClCompile Include="Server.c">
       <Filter>Source Files\Network</Filter>
     </ClCompile>
@@ -530,9 +533,6 @@
     <ClCompile Include="Input.c">
       <Filter>Source Files\Game</Filter>
     </ClCompile>
-    <ClCompile Include="Graphics.c">
-      <Filter>Source Files\Graphics</Filter>
-    </ClCompile>
     <ClCompile Include="Animations.c">
       <Filter>Source Files\TexturePack</Filter>
     </ClCompile>
@@ -544,6 +544,51 @@
     </ClCompile>
     <ClCompile Include="Platform_Posix.c">
       <Filter>Source Files\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="LBackend.c">
+      <Filter>Source Files\Launcher</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics_D3D9.c">
+      <Filter>Source Files\Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="Http_Web.c">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="Http_Worker.c">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="Window_SDL.c">
+      <Filter>Source Files\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="Window_Web.c">
+      <Filter>Source Files\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="Window_Android.c">
+      <Filter>Source Files\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="Window_X11.c">
+      <Filter>Source Files\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="Window_Win.c">
+      <Filter>Source Files\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="Window_Carbon.c">
+      <Filter>Source Files\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics_D3D11.c">
+      <Filter>Source Files\Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="Platform_Android.c">
+      <Filter>Source Files\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics_GL1.c">
+      <Filter>Source Files\Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="Graphics_GL2.c">
+      <Filter>Source Files\Graphics</Filter>
+    </ClCompile>
+    <ClCompile Include="GameVersion.c">
+      <Filter>Source Files\Game</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

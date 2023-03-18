@@ -1,10 +1,12 @@
 #ifndef CC_LWEB_H
 #define CC_LWEB_H
-#include "Http.h"
+#include "Bitmap.h"
+#include "Constants.h"
 /* Implements asynchronous web tasks for the launcher.
-	Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+	Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 
+struct HttpRequest;
 struct JsonContext;
 typedef void (*JsonOnValue)(struct JsonContext* ctx, const cc_string* v);
 typedef void (*JsonOnNew)(struct JsonContext* ctx);
@@ -41,19 +43,25 @@ struct ServerInfo {
 	char _softBuffer[STRING_SIZE];
 };
 
+/* Represents a country flag */
+struct Flag {
+	struct Bitmap bmp;
+	char country[2]; /* ISO 3166-1 alpha-2 */
+	void* meta; /* Backend specific meta */
+};
+
 struct LWebTask {
 	cc_bool completed; /* Whether the task has finished executing. */
 	cc_bool working;   /* Whether the task is currently in progress, or is scheduled to be. */
 	cc_bool success;   /* Whether the task completed successfully. */
-	cc_result res;     /* Error returned (e.g. for DNS failure) */
-	int status;        /* HTTP return code for the request */
 	
 	int reqID; /* Unique request identifier for this web task. */
 	/* Called when task successfully downloaded/uploaded data. */
 	void (*Handle)(cc_uint8* data, cc_uint32 len);
 };
-void LWebTask_Tick(struct LWebTask* task);
-void LWebTask_DisplayError(struct LWebTask* task, const char* action, cc_string* dst);
+typedef void (*LWebTask_ErrorCallback)(struct HttpRequest* req);
+
+void LWebTask_Tick(struct LWebTask* task, LWebTask_ErrorCallback errorCallback);
 void LWebTasks_Init(void);
 
 
@@ -107,7 +115,7 @@ extern struct FetchUpdateData {
 	/* Unix timestamp downloaded build was originally built at. */
 	cc_uint64 timestamp;
 } FetchUpdateTask;
-void FetchUpdateTask_Run(cc_bool release, cc_bool d3d9);
+void FetchUpdateTask_Run(cc_bool release, int buildIndex);
 
 
 extern struct FetchFlagsData { 
@@ -115,10 +123,11 @@ extern struct FetchFlagsData {
 	/* Number of flags downloaded. */
 	int count;
 } FetchFlagsTask;
+
 /* Asynchronously downloads the flag associated with the given server's country. */
 void FetchFlagsTask_Add(const struct ServerInfo* server);
-/* Gets the bitmap for the flag associated with the given server's country. */
-struct Bitmap* Flags_Get(const struct ServerInfo* server);
+/* Gets the country flag associated with the given server's country. */
+struct Flag* Flags_Get(const struct ServerInfo* server);
 /* Frees all flag bitmaps. */
 void Flags_Free(void);
 

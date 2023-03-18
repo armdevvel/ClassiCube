@@ -172,8 +172,6 @@ FT_BEGIN_HEADER
     FT_PIXEL_MODE_GRAY,
     FT_PIXEL_MODE_GRAY2,
     FT_PIXEL_MODE_GRAY4,
-    FT_PIXEL_MODE_LCD,
-    FT_PIXEL_MODE_LCD_V,
     FT_PIXEL_MODE_BGRA,
 
     FT_PIXEL_MODE_MAX      /* do not remove */
@@ -673,21 +671,13 @@ FT_BEGIN_HEADER
   /*      generally want to access the `outline' field of the              */
   /*      @FT_GlyphSlotRec structure to read it.                           */
   /*                                                                       */
-  /*    FT_GLYPH_FORMAT_PLOTTER ::                                         */
-  /*      The glyph image is a vectorial path with no inside and outside   */
-  /*      contours.  Some Type~1 fonts, like those in the Hershey family,  */
-  /*      contain glyphs in this format.  These are described as           */
-  /*      @FT_Outline, but FreeType isn't currently capable of rendering   */
-  /*      them correctly.                                                  */
-  /*                                                                       */
   typedef enum  FT_Glyph_Format_
   {
     FT_IMAGE_TAG( FT_GLYPH_FORMAT_NONE, 0, 0, 0, 0 ),
 
     FT_IMAGE_TAG( FT_GLYPH_FORMAT_COMPOSITE, 'c', 'o', 'm', 'p' ),
     FT_IMAGE_TAG( FT_GLYPH_FORMAT_BITMAP,    'b', 'i', 't', 's' ),
-    FT_IMAGE_TAG( FT_GLYPH_FORMAT_OUTLINE,   'o', 'u', 't', 'l' ),
-    FT_IMAGE_TAG( FT_GLYPH_FORMAT_PLOTTER,   'p', 'l', 'o', 't' )
+    FT_IMAGE_TAG( FT_GLYPH_FORMAT_OUTLINE,   'o', 'u', 't', 'l' )
 
   } FT_Glyph_Format;
 
@@ -745,18 +735,6 @@ FT_BEGIN_HEADER
   /*    FT_Raster_Funcs                                                    */
   /*                                                                       */
   /*************************************************************************/
-
-
-  /*************************************************************************/
-  /*                                                                       */
-  /* <Type>                                                                */
-  /*    FT_Raster                                                          */
-  /*                                                                       */
-  /* <Description>                                                         */
-  /*    An opaque handle (pointer) to a raster object.  Each object can be */
-  /*    used independently to convert an outline into a bitmap or pixmap.  */
-  /*                                                                       */
-  typedef struct FT_RasterRec_*  FT_Raster;
 
 
   /*************************************************************************/
@@ -830,34 +808,6 @@ FT_BEGIN_HEADER
 
   /*************************************************************************/
   /*                                                                       */
-  /* <FuncType>                                                            */
-  /*    FT_Raster_BitTest_Func                                             */
-  /*                                                                       */
-  /* <Description>                                                         */
-  /*    Deprecated, unimplemented.                                         */
-  /*                                                                       */
-  typedef int
-  (*FT_Raster_BitTest_Func)( int    y,
-                             int    x,
-                             void*  user );
-
-
-  /*************************************************************************/
-  /*                                                                       */
-  /* <FuncType>                                                            */
-  /*    FT_Raster_BitSet_Func                                              */
-  /*                                                                       */
-  /* <Description>                                                         */
-  /*    Deprecated, unimplemented.                                         */
-  /*                                                                       */
-  typedef void
-  (*FT_Raster_BitSet_Func)( int    y,
-                            int    x,
-                            void*  user );
-
-
-  /*************************************************************************/
-  /*                                                                       */
   /* <Enum>                                                                */
   /*    FT_RASTER_FLAG_XXX                                                 */
   /*                                                                       */
@@ -921,12 +871,6 @@ FT_BEGIN_HEADER
   /*                                                                       */
   /*    gray_spans  :: The gray span drawing callback.                     */
   /*                                                                       */
-  /*    black_spans :: Unused.                                             */
-  /*                                                                       */
-  /*    bit_test    :: Unused.                                             */
-  /*                                                                       */
-  /*    bit_set     :: Unused.                                             */
-  /*                                                                       */
   /*    user        :: User-supplied data that is passed to each drawing   */
   /*                   callback.                                           */
   /*                                                                       */
@@ -952,121 +896,10 @@ FT_BEGIN_HEADER
     const void*             source;
     int                     flags;
     FT_SpanFunc             gray_spans;
-    FT_SpanFunc             black_spans;  /* unused */
-    FT_Raster_BitTest_Func  bit_test;     /* unused */
-    FT_Raster_BitSet_Func   bit_set;      /* unused */
     void*                   user;
     FT_BBox                 clip_box;
 
   } FT_Raster_Params;
-
-
-  /*************************************************************************/
-  /*                                                                       */
-  /* <FuncType>                                                            */
-  /*    FT_Raster_NewFunc                                                  */
-  /*                                                                       */
-  /* <Description>                                                         */
-  /*    A function used to create a new raster object.                     */
-  /*                                                                       */
-  /* <Input>                                                               */
-  /*    memory :: A handle to the memory allocator.                        */
-  /*                                                                       */
-  /* <Output>                                                              */
-  /*    raster :: A handle to the new raster object.                       */
-  /*                                                                       */
-  /* <Return>                                                              */
-  /*    Error code.  0~means success.                                      */
-  /*                                                                       */
-  /* <Note>                                                                */
-  /*    The `memory' parameter is a typeless pointer in order to avoid     */
-  /*    un-wanted dependencies on the rest of the FreeType code.  In       */
-  /*    practice, it is an @FT_Memory object, i.e., a handle to the        */
-  /*    standard FreeType memory allocator.  However, this field can be    */
-  /*    completely ignored by a given raster implementation.               */
-  /*                                                                       */
-  typedef int
-  (*FT_Raster_NewFunc)( void*       memory,
-                        FT_Raster*  raster );
-
-#define FT_Raster_New_Func  FT_Raster_NewFunc
-
-
-  /*************************************************************************/
-  /*                                                                       */
-  /* <FuncType>                                                            */
-  /*    FT_Raster_DoneFunc                                                 */
-  /*                                                                       */
-  /* <Description>                                                         */
-  /*    A function used to destroy a given raster object.                  */
-  /*                                                                       */
-  /* <Input>                                                               */
-  /*    raster :: A handle to the raster object.                           */
-  /*                                                                       */
-  typedef void
-  (*FT_Raster_DoneFunc)( FT_Raster  raster );
-
-#define FT_Raster_Done_Func  FT_Raster_DoneFunc
-
-
-  /*************************************************************************/
-  /*                                                                       */
-  /* <FuncType>                                                            */
-  /*    FT_Raster_ResetFunc                                                */
-  /*                                                                       */
-  /* <Description>                                                         */
-  /*    FreeType used to provide an area of memory called the `render      */
-  /*    pool' available to all registered rasterizers.  This was not       */
-  /*    thread safe, however, and now FreeType never allocates this pool.  */
-  /*                                                                       */
-  /*    This function is called after a new raster object is created.      */
-  /*                                                                       */
-  /* <Input>                                                               */
-  /*    raster    :: A handle to the new raster object.                    */
-  /*                                                                       */
-  /*    pool_base :: Previously, the address in memory of the render pool. */
-  /*                 Set this to NULL.                                     */
-  /*                                                                       */
-  /*    pool_size :: Previously, the size in bytes of the render pool.     */
-  /*                 Set this to 0.                                        */
-  /*                                                                       */
-  /* <Note>                                                                */
-  /*    Rasterizers should rely on dynamic or stack allocation if they     */
-  /*    want to (a handle to the memory allocator is passed to the         */
-  /*    rasterizer constructor).                                           */
-  /*                                                                       */
-  typedef void
-  (*FT_Raster_ResetFunc)( FT_Raster       raster,
-                          unsigned char*  pool_base,
-                          unsigned long   pool_size );
-
-#define FT_Raster_Reset_Func  FT_Raster_ResetFunc
-
-
-  /*************************************************************************/
-  /*                                                                       */
-  /* <FuncType>                                                            */
-  /*    FT_Raster_SetModeFunc                                              */
-  /*                                                                       */
-  /* <Description>                                                         */
-  /*    This function is a generic facility to change modes or attributes  */
-  /*    in a given raster.  This can be used for debugging purposes, or    */
-  /*    simply to allow implementation-specific `features' in a given      */
-  /*    raster module.                                                     */
-  /*                                                                       */
-  /* <Input>                                                               */
-  /*    raster :: A handle to the new raster object.                       */
-  /*                                                                       */
-  /*    mode   :: A 4-byte tag used to name the mode or property.          */
-  /*                                                                       */
-  /*    args   :: A pointer to the new mode/property to use.               */
-  /*                                                                       */
-  typedef int
-  (*FT_Raster_SetModeFunc)( FT_Raster      raster,
-                            unsigned long  mode,
-                            void*          args );
-
-#define FT_Raster_Set_Mode_Func  FT_Raster_SetModeFunc
 
 
   /*************************************************************************/
@@ -1079,8 +912,6 @@ FT_BEGIN_HEADER
   /*    target bitmap.                                                     */
   /*                                                                       */
   /* <Input>                                                               */
-  /*    raster :: A handle to the raster object.                           */
-  /*                                                                       */
   /*    params :: A pointer to an @FT_Raster_Params structure used to      */
   /*              store the rendering parameters.                          */
   /*                                                                       */
@@ -1104,8 +935,7 @@ FT_BEGIN_HEADER
   /*         composition).                                                 */
   /*                                                                       */
   typedef int
-  (*FT_Raster_RenderFunc)( FT_Raster                raster,
-                           const FT_Raster_Params*  params );
+  (*FT_Raster_RenderFunc)( const FT_Raster_Params*  params );
 
 #define FT_Raster_Render_Func  FT_Raster_RenderFunc
 
@@ -1119,25 +949,11 @@ FT_BEGIN_HEADER
   /*   A structure used to describe a given raster class to the library.   */
   /*                                                                       */
   /* <Fields>                                                              */
-  /*    glyph_format  :: The supported glyph format for this raster.       */
-  /*                                                                       */
-  /*    raster_new    :: The raster constructor.                           */
-  /*                                                                       */
-  /*    raster_reset  :: Used to reset the render pool within the raster.  */
-  /*                                                                       */
   /*    raster_render :: A function to render a glyph into a given bitmap. */
-  /*                                                                       */
-  /*    raster_done   :: The raster destructor.                            */
   /*                                                                       */
   typedef struct  FT_Raster_Funcs_
   {
-    FT_Glyph_Format        glyph_format;
-
-    FT_Raster_NewFunc      raster_new;
-    FT_Raster_ResetFunc    raster_reset;
-    FT_Raster_SetModeFunc  raster_set_mode;
     FT_Raster_RenderFunc   raster_render;
-    FT_Raster_DoneFunc     raster_done;
 
   } FT_Raster_Funcs;
 

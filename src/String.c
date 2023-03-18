@@ -269,7 +269,7 @@ void String_AppendColorless(cc_string* str, const cc_string* src) {
 
 	for (i = 0; i < src->length; i++) {
 		c = src->buffer[i];
-		if (c == '&') { i++; continue; } /* Skip over the following colour code */
+		if (c == '&') { i++; continue; } /* Skip over the following color code */
 		String_Append(str, c);
 	}
 }
@@ -617,6 +617,20 @@ void String_DecodeCP1252(cc_string* value, const void* data, int numBytes) {
 	}
 }
 
+int String_EncodeUtf8(void* data, const cc_string* src) {
+	cc_uint8* dst = (cc_uint8*)data;
+	cc_uint8* cur;
+	int i, len = 0;
+	if (src->length > FILENAME_SIZE) Logger_Abort("String too long to expand");
+
+	for (i = 0; i < src->length; i++) {
+		cur = dst + len;
+		len += Convert_CP437ToUtf8(src->buffer[i], cur);
+	}
+	dst[len] = '\0';
+	return len;
+}
+
 
 /*########################################################################################################################*
 *--------------------------------------------------Numerical conversions--------------------------------------------------*
@@ -768,7 +782,7 @@ cc_bool Convert_ParseBool(const cc_string* str, cc_bool* value) {
 #define StringsBuffer_GetLength(raw)  ((raw)  & buffer->_lenMask)
 #define StringsBuffer_PackOffset(off) ((off) << buffer->_lenShift)
 
-CC_NOINLINE static void StringsBuffer_Init(struct StringsBuffer* buffer) {
+void StringsBuffer_Init(struct StringsBuffer* buffer) {
 	buffer->count       = 0;
 	buffer->totalLength = 0;
 	buffer->textBuffer     = buffer->_defaultBuffer;
@@ -870,6 +884,32 @@ void StringsBuffer_Remove(struct StringsBuffer* buffer, int index) {
 	
 	buffer->count--;
 	buffer->totalLength -= len;
+}
+
+static struct StringsBuffer* sort_buffer;
+static void StringsBuffer_QuickSort(int left, int right) {
+	struct StringsBuffer* buffer = sort_buffer;
+	cc_uint32* keys = buffer->flagsBuffer; cc_uint32 key;
+
+	while (left < right) {
+		int i = left, j = right;
+		cc_string pivot = StringsBuffer_UNSAFE_Get(buffer, (i + j) >> 1);
+		cc_string strI, strJ;
+
+		/* partition the list */
+		while (i <= j) {
+			while ((strI = StringsBuffer_UNSAFE_Get(buffer, i), String_Compare(&pivot, &strI)) > 0) i++;
+			while ((strJ = StringsBuffer_UNSAFE_Get(buffer, j), String_Compare(&pivot, &strJ)) < 0) j--;
+			QuickSort_Swap_Maybe();
+		}
+		/* recurse into the smaller subset */
+		QuickSort_Recurse(StringsBuffer_QuickSort)
+	}
+}
+
+void StringsBuffer_Sort(struct StringsBuffer* buffer) {
+	sort_buffer = buffer;
+	StringsBuffer_QuickSort(0, buffer->count - 1);
 }
 
 

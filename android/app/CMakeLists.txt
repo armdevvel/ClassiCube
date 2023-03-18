@@ -30,10 +30,10 @@ add_library(classicube SHARED
         ../../src/Utils.c
         ../../src/Camera.c
         ../../src/Game.c
-        ../../src/Window.c
+        ../../src/GameVersion.c
+        ../../src/Window_Android.c
         ../../src/_ftbase.c
-        ../../src/Graphics.c
-        ../../src/_type1cid.c
+        ../../src/Graphics_GL2.c
         ../../src/Deflate.c
         ../../src/_cff.c
         ../../src/_ftsynth.c
@@ -48,14 +48,14 @@ add_library(classicube SHARED
         ../../src/Protocol.c
         ../../src/World.c
         ../../src/PickedPosRenderer.c
-        ../../src/Platform.c
+        ../../src/Platform_Posix.c
+        ../../src/Platform_Android.c
         ../../src/LScreens.c
         ../../src/_truetype.c
         ../../src/_ftglyph.c
         ../../src/Model.c
         ../../src/_autofit.c
         ../../src/Vectors.c
-        ../../src/_raster.c
         ../../src/HeldBlockRenderer.c
         ../../src/Inventory.c
         ../../src/Launcher.c
@@ -71,7 +71,7 @@ add_library(classicube SHARED
         ../../src/Bitmap.c
         ../../src/EntityComponents.c
         ../../src/_pshinter.c
-        ../../src/Http.c
+        ../../src/Http_Worker.c
         ../../src/MapRenderer.c
         ../../src/Audio.c
         ../../src/_ftinit.c
@@ -96,6 +96,7 @@ add_library(classicube SHARED
         ../../src/SelectionBox.c
         ../../src/EnvRenderer.c
         ../../src/Animations.c
+        ../../src/LBackend.c
         )
 
 # add lib dependencies

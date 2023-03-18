@@ -105,7 +105,6 @@ static void HUDScreen_UpdateLine1(struct HUDScreen* s) {
 static void HUDScreen_DrawPosition(struct HUDScreen* s) {
 	struct VertexTextured vertices[4 * 64];
 	struct VertexTextured* ptr = vertices;
-	PackedCol col = PACKEDCOL_WHITE;
 
 	struct TextAtlas* atlas = &s->posAtlas;
 	struct Texture tex;
@@ -115,7 +114,7 @@ static void HUDScreen_DrawPosition(struct HUDScreen* s) {
 	/* Make "Position: " prefix */
 	tex = atlas->tex; 
 	tex.X = 2; tex.Width = atlas->offset;
-	Gfx_Make2DQuad(&tex, col, &ptr);
+	Gfx_Make2DQuad(&tex, PACKEDCOL_WHITE, &ptr);
 
 	IVec3_Floor(&pos, &LocalPlayer_Instance.Base.Position);
 	atlas->curX = atlas->offset + 2;
@@ -187,10 +186,9 @@ static void HUDScreen_ContextRecreated(void* screen) {
 	static const cc_string prefix = String_FromConst("Position: ");
 
 	struct HUDScreen* s      = (struct HUDScreen*)screen;
-	struct TextWidget* line1 = &s->line1;
 	struct TextWidget* line2 = &s->line2;
 
-	Drawer2D_MakeFont(&s->font, 16, FONT_FLAGS_PADDING);
+	Font_Make(&s->font, 16, FONT_FLAGS_PADDING);
 	Font_SetPadding(&s->font, 2);
 	HotbarWidget_SetFont(&s->hotbar, &s->font);
 
@@ -198,7 +196,7 @@ static void HUDScreen_ContextRecreated(void* screen) {
 	TextAtlas_Make(&s->posAtlas, &chars, &s->font, &prefix);
 
 	if (Game_ClassicMode) {
-		TextWidget_SetConst(line2, "0.30", &s->font);
+		TextWidget_SetConst(line2, Game_Version.Name, &s->font);
 	} else {
 		HUDScreen_UpdateHackState(s);
 	}
@@ -257,6 +255,18 @@ static int HUDscreen_PointerDown(void* screen, int id, int x, int y) {
 	return false;
 }
 
+static void HUDScreen_PointerUp(void *screen, int id, int x, int y) {
+	struct HUDScreen* s = (struct HUDScreen*)screen;
+	if(!Input_TouchMode) return;
+	Elem_OnPointerUp(&s->hotbar, id, x, y);
+}
+
+static int HUDScreen_PointerMove(void *screen, int id, int x, int y) {
+	struct HUDScreen* s = (struct HUDScreen*)screen;
+	if(!Input_TouchMode) return false;
+	return Elem_HandlesPointerMove(&s->hotbar, id, x, y);
+}
+
 static int HUDscreen_MouseScroll(void* screen, float delta) {
 	struct HUDScreen* s = (struct HUDScreen*)screen;
 	/* The default scrolling behaviour (e.g. camera, zoom) needs to be checked */
@@ -285,7 +295,6 @@ static void HUDScreen_Render(void* screen, double delta) {
 	if (Game_HideGui) return;
 
 	/* TODO: If Game_ShowFps is off and not classic mode, we should just return here */
-	Gfx_SetTexturing(true);
 	if (Gui.ShowFPS) Elem_Render(&s->line1, delta);
 
 	if (Game_ClassicMode) {
@@ -297,7 +306,6 @@ static void HUDScreen_Render(void* screen, double delta) {
 	}
 
 	if (!Gui_GetBlocksWorld()) Elem_Render(&s->hotbar, delta);
-	Gfx_SetTexturing(false);
 }
 
 static void HUDScreen_Free(void* screen) {
@@ -308,7 +316,7 @@ static const struct ScreenVTABLE HUDScreen_VTABLE = {
 	HUDScreen_Init,        HUDScreen_Update,    HUDScreen_Free,
 	HUDScreen_Render,      HUDScreen_BuildMesh,
 	HUDScreen_KeyDown,     HUDScreen_InputUp,   Screen_FKeyPress, Screen_FText,
-	HUDscreen_PointerDown, Screen_PointerUp,    Screen_FPointer,  HUDscreen_MouseScroll,
+	HUDscreen_PointerDown, HUDScreen_PointerUp, HUDScreen_PointerMove,  HUDscreen_MouseScroll,
 	HUDScreen_Layout,      HUDScreen_ContextLost, HUDScreen_ContextRecreated
 };
 void HUDScreen_Show(void) {
@@ -653,7 +661,7 @@ static void TabListOverlay_ContextRecreated(void* screen) {
 	int size, id;
 
 	size = Drawer2D.BitmappedText ? 16 : 11;
-	Drawer2D_MakeFont(&s->font, size, FONT_FLAGS_PADDING);
+	Font_Make(&s->font, size, FONT_FLAGS_PADDING);
 	s->namesCount = 0;
 
 	TextWidget_SetConst(&s->title, "Connected players:", &s->font);
@@ -679,10 +687,8 @@ static void TabListOverlay_Render(void* screen, double delta) {
 	PackedCol bottomCol = PackedCol_Make(50, 50, 50, 205);
 
 	if (Game_HideGui || !IsOnlyChatActive()) return;
-	Gfx_SetTexturing(false);
 	Gfx_Draw2DGradient(s->x, s->y, s->width, s->height, topCol, bottomCol);
 
-	Gfx_SetTexturing(true);
 	Elem_Render(title, delta);
 	grabbed = Gui.InputGrab;
 
@@ -695,7 +701,6 @@ static void TabListOverlay_Render(void* screen, double delta) {
 		}
 		Texture_Render(&tex);
 	}
-	Gfx_SetTexturing(false);
 }
 
 static void TabListOverlay_Free(void* screen) {
@@ -743,8 +748,8 @@ static struct ChatScreen {
 	cc_bool suppressNextPress;
 	int chatIndex, paddingX, paddingY;
 	int lastDownloadStatus;
-	struct FontDesc chatFont, announcementFont;
-	struct TextWidget announcement;
+	struct FontDesc chatFont, announcementFont, bigAnnouncementFont, smallAnnouncementFont;
+	struct TextWidget announcement, bigAnnouncement, smallAnnouncement;
 	struct ChatInputWidget input;
 	struct TextGroupWidget status, bottomRight, chat, clientStatus;
 	struct SpecialInputWidget altText;
@@ -755,7 +760,7 @@ static struct ChatScreen {
 	struct Texture statusTextures[CHAT_MAX_STATUS];
 	struct Texture bottomRightTextures[CHAT_MAX_BOTTOMRIGHT];
 	struct Texture clientStatusTextures[CHAT_MAX_CLIENTSTATUS];
-	struct Texture chatTextures[TEXTGROUPWIDGET_MAX_LINES];
+	struct Texture chatTextures[GUI_MAX_CHATLINES];
 } ChatScreen_Instance;
 #define CH_EXTENT 16
 
@@ -796,6 +801,8 @@ static cc_string ChatScreen_GetClientStatus(int i) { return Chat_ClientStatus[i]
 static void ChatScreen_FreeChatFonts(struct ChatScreen* s) {
 	Font_Free(&s->chatFont);
 	Font_Free(&s->announcementFont);
+	Font_Free(&s->bigAnnouncementFont);
+	Font_Free(&s->smallAnnouncementFont);
 }
 
 static cc_bool ChatScreen_ChatUpdateFont(struct ChatScreen* s) {
@@ -806,11 +813,13 @@ static cc_bool ChatScreen_ChatUpdateFont(struct ChatScreen* s) {
 	/* TODO: Add function for this, don't use Display_ScaleY (Drawer2D_SameFontSize ??) */
 	if (Display_ScaleY(size) == s->chatFont.size) return false;
 	ChatScreen_FreeChatFonts(s);
-	Drawer2D_MakeFont(&s->chatFont, size, FONT_FLAGS_PADDING);
+	Font_Make(&s->chatFont, size, FONT_FLAGS_PADDING);
 
 	size = (int)(16 * Gui_GetChatScale());
 	Math_Clamp(size, 8, 60);
-	Drawer2D_MakeFont(&s->announcementFont, size, FONT_FLAGS_NONE);
+	Font_Make(&s->announcementFont, size, FONT_FLAGS_NONE);
+	Font_Make(&s->bigAnnouncementFont, size * 1.33, FONT_FLAGS_NONE);
+	Font_Make(&s->smallAnnouncementFont, size * 0.67, FONT_FLAGS_NONE);
 
 	ChatInputWidget_SetFont(&s->input,        &s->chatFont);
 	TextGroupWidget_SetFont(&s->status,       &s->chatFont);
@@ -823,6 +832,8 @@ static cc_bool ChatScreen_ChatUpdateFont(struct ChatScreen* s) {
 static void ChatScreen_Redraw(struct ChatScreen* s) {
 	TextGroupWidget_RedrawAll(&s->chat);
 	TextWidget_Set(&s->announcement, &Chat_Announcement, &s->announcementFont);
+	TextWidget_Set(&s->bigAnnouncement, &Chat_BigAnnouncement, &s->bigAnnouncementFont);
+	TextWidget_Set(&s->smallAnnouncement, &Chat_SmallAnnouncement, &s->smallAnnouncementFont);
 	TextGroupWidget_RedrawAll(&s->status);
 	TextGroupWidget_RedrawAll(&s->bottomRight);
 	TextGroupWidget_RedrawAll(&s->clientStatus);
@@ -879,19 +890,20 @@ static void ChatScreen_EnterChatInput(struct ChatScreen* s, cc_bool close) {
 
 static void ChatScreen_UpdateTexpackStatus(struct ChatScreen* s) {
 	int progress = Http_CheckProgress(TexturePack_ReqID);
+	cc_string msg; char msgBuffer[STRING_SIZE];
 	if (progress == s->lastDownloadStatus) return;
 
 	s->lastDownloadStatus = progress;
-	Chat_Status[0].length = 0;
+	String_InitArray(msg, msgBuffer);
 
 	if (progress == HTTP_PROGRESS_MAKING_REQUEST) {
-		String_AppendConst(&Chat_Status[0], "&eRetrieving texture pack..");
+		String_AppendConst(&msg, "&eRetrieving texture pack..");
 	} else if (progress == HTTP_PROGRESS_FETCHING_DATA) {
-		String_AppendConst(&Chat_Status[0], "&eDownloading texture pack");
+		String_AppendConst(&msg, "&eDownloading texture pack");
 	} else if (progress >= 0 && progress <= 100) {
-		String_Format1(&Chat_Status[0], "&eDownloading texture pack (&7%i&e%%)", &progress);
+		String_Format1(&msg, "&eDownloading texture pack (&7%i&e%%)", &progress);
 	}
-	TextGroupWidget_Redraw(&s->status, 0);
+	Chat_AddOf(&msg, MSG_TYPE_EXTRASTATUS_1);
 }
 
 static void ChatScreen_ColCodeChanged(void* screen, int code) {
@@ -922,16 +934,25 @@ static void ChatScreen_ChatReceived(void* screen, const cc_string* msg, int type
 		TextGroupWidget_ShiftUp(&s->chat);
 	} else if (type >= MSG_TYPE_STATUS_1 && type <= MSG_TYPE_STATUS_3) {
 		/* Status[0] is for texture pack downloading message */
-		TextGroupWidget_Redraw(&s->status, 1 + (type - MSG_TYPE_STATUS_1));
+		/* Status[1] is for reduced performance mode message */
+		TextGroupWidget_Redraw(&s->status, 2 + (type - MSG_TYPE_STATUS_1));
 	} else if (type >= MSG_TYPE_BOTTOMRIGHT_1 && type <= MSG_TYPE_BOTTOMRIGHT_3) {
 		/* Bottom3 is top most line, so need to redraw index 0 */
 		TextGroupWidget_Redraw(&s->bottomRight, 2 - (type - MSG_TYPE_BOTTOMRIGHT_1));
 	} else if (type == MSG_TYPE_ANNOUNCEMENT) {
 		TextWidget_Set(&s->announcement, msg, &s->announcementFont);
+	} else if (type == MSG_TYPE_BIGANNOUNCEMENT) {
+		TextWidget_Set(&s->bigAnnouncement, msg, &s->bigAnnouncementFont);
+	} else if (type == MSG_TYPE_SMALLANNOUNCEMENT) {
+		TextWidget_Set(&s->smallAnnouncement, msg, &s->smallAnnouncementFont);
 	} else if (type >= MSG_TYPE_CLIENTSTATUS_1 && type <= MSG_TYPE_CLIENTSTATUS_2) {
 		TextGroupWidget_Redraw(&s->clientStatus, type - MSG_TYPE_CLIENTSTATUS_1);
 		ChatScreen_UpdateChatYOffsets(s);
-	}
+	} else if (type >= MSG_TYPE_EXTRASTATUS_1 && type <= MSG_TYPE_EXTRASTATUS_2) {
+		/* Status[0] is for texture pack downloading message */
+		/* Status[1] is for reduced performance mode message */
+		TextGroupWidget_Redraw(&s->status, type - MSG_TYPE_EXTRASTATUS_1);
+	} 
 }
 
 static void ChatScreen_DrawCrosshairs(void) {
@@ -985,7 +1006,7 @@ static void ChatScreen_DrawChat(struct ChatScreen* s, double delta) {
 			if (!tex.ID) continue;
 
 			if (logIdx < 0 || logIdx >= Chat_Log.count) continue;
-			if (Chat_LogTime[logIdx] + 10 >= now) Texture_Render(&tex);
+			if (Chat_GetLogTime(logIdx) + 10 >= now) Texture_Render(&tex);
 		}
 	}
 
@@ -994,7 +1015,18 @@ static void ChatScreen_DrawChat(struct ChatScreen* s, double delta) {
 	if (s->announcement.tex.ID && now > Chat_AnnouncementReceived + 5) {
 		Elem_Free(&s->announcement);
 	}
+
+	if (s->bigAnnouncement.tex.ID && now > Chat_BigAnnouncementReceived + 5) {
+		Elem_Free(&s->bigAnnouncement);
+	}
+
+	if (s->smallAnnouncement.tex.ID && now > Chat_SmallAnnouncementReceived + 5) {
+		Elem_Free(&s->smallAnnouncement);
+	}
+
 	Elem_Render(&s->announcement, delta);
+	Elem_Render(&s->bigAnnouncement, delta);
+	Elem_Render(&s->smallAnnouncement, delta);
 
 	if (s->grabsInput) {
 		Elem_Render(&s->input.base, delta);
@@ -1022,9 +1054,10 @@ static void ChatScreen_ContextLost(void* screen) {
 	Elem_Free(&s->bottomRight);
 	Elem_Free(&s->clientStatus);
 	Elem_Free(&s->announcement);
+	Elem_Free(&s->bigAnnouncement);
+	Elem_Free(&s->smallAnnouncement);
 
 #ifdef CC_BUILD_TOUCH
-	if (!Input_TouchMode) return;
 	Elem_Free(&s->more);
 	Elem_Free(&s->send);
 	Elem_Free(&s->cancel);
@@ -1072,8 +1105,15 @@ static void ChatScreen_Layout(void* screen) {
 	s->announcement.yOffset = -WindowInfo.Height / 4;
 	Widget_Layout(&s->announcement);
 
+	Widget_SetLocation(&s->bigAnnouncement, ANCHOR_CENTRE, ANCHOR_CENTRE, 0, 0);
+	s->bigAnnouncement.yOffset = -WindowInfo.Height / 16;
+	Widget_Layout(&s->bigAnnouncement);
+
+	Widget_SetLocation(&s->smallAnnouncement, ANCHOR_CENTRE, ANCHOR_CENTRE, 0, 0);
+	s->smallAnnouncement.yOffset = WindowInfo.Height / 20;
+	Widget_Layout(&s->smallAnnouncement);
+
 #ifdef CC_BUILD_TOUCH
-	if (!Input_TouchMode) return;
 	if (WindowInfo.SoftKeyboard == SOFT_KEYBOARD_SHIFT) {
 		Widget_SetLocation(&s->send,   ANCHOR_MAX, ANCHOR_MAX, 10,  60);
 		Widget_SetLocation(&s->cancel, ANCHOR_MAX, ANCHOR_MAX, 10,  10);
@@ -1199,19 +1239,21 @@ static int ChatScreen_PointerDown(void* screen, int id, int x, int y) {
 		i = TextGroupWidget_GetSelected(&s->chat, &text, x, y);
 		if (!Utils_IsUrlPrefix(&text)) return false;
 
-		if (Chat_LogTime[s->chatIndex + i] + 10 < Game.Time) return false;
+		if (Chat_GetLogTime(s->chatIndex + i) + 10 < Game.Time) return false;
 		UrlWarningOverlay_Show(&text); return TOUCH_TYPE_GUI;
 	}
 
 #ifdef CC_BUILD_TOUCH
-	if (Widget_Contains(&s->send, x, y)) {
-		ChatScreen_EnterChatInput(s, false); return TOUCH_TYPE_GUI;
-	}
-	if (Widget_Contains(&s->cancel, x, y)) {
-		ChatScreen_EnterChatInput(s, true); return TOUCH_TYPE_GUI;
-	}
-	if (Widget_Contains(&s->more, x, y)) {
-		ChatScreen_ToggleAltInput(s); return TOUCH_TYPE_GUI;
+	if (Input_TouchMode) {
+		if (Widget_Contains(&s->send, x, y)) {
+			ChatScreen_EnterChatInput(s, false); return TOUCH_TYPE_GUI;
+		}
+		if (Widget_Contains(&s->cancel, x, y)) {
+			ChatScreen_EnterChatInput(s, true); return TOUCH_TYPE_GUI;
+		}
+		if (Widget_Contains(&s->more, x, y)) {
+			ChatScreen_ToggleAltInput(s); return TOUCH_TYPE_GUI;
+		}
 	}
 #endif
 
@@ -1256,8 +1298,11 @@ static void ChatScreen_Init(void* screen) {
 	TextGroupWidget_Create(&s->clientStatus, CHAT_MAX_CLIENTSTATUS,
 							s->clientStatusTextures, ChatScreen_GetClientStatus);
 	TextWidget_Init(&s->announcement);
+	TextWidget_Init(&s->bigAnnouncement);
+	TextWidget_Init(&s->smallAnnouncement);
 
-	s->status.collapsible[0]       = true; /* Texture pack download status */
+	s->status.collapsible[0]       = true; /* Texture pack downloading status */
+	s->status.collapsible[1]       = true; /* Reduced performance mode status */
 	s->clientStatus.collapsible[0] = true;
 	s->clientStatus.collapsible[1] = true;
 
@@ -1268,7 +1313,6 @@ static void ChatScreen_Init(void* screen) {
 	Event_Register_(&ChatEvents.ColCodeChanged, s, ChatScreen_ColCodeChanged);
 
 #ifdef CC_BUILD_TOUCH
-	if (!Input_TouchMode) return;
 	ButtonWidget_Init(&s->send,   100, NULL);
 	ButtonWidget_Init(&s->cancel, 100, NULL);
 	ButtonWidget_Init(&s->more,   100, NULL);
@@ -1279,24 +1323,18 @@ static void ChatScreen_Render(void* screen, double delta) {
 	struct ChatScreen* s = (struct ChatScreen*)screen;
 
 	if (Game_HideGui && s->grabsInput) {
-		Gfx_SetTexturing(true);
 		Elem_Render(&s->input.base, delta);
-		Gfx_SetTexturing(false);
 	}
 	if (Game_HideGui) return;
 
 	if (!TabListOverlay_Instance.active && !Gui_GetBlocksWorld()) {
-		Gfx_SetTexturing(true);
 		ChatScreen_DrawCrosshairs();
-		Gfx_SetTexturing(false);
 	}
 	if (s->grabsInput && !Gui.ClassicChat) {
 		ChatScreen_DrawChatBackground(s);
 	}
 
-	Gfx_SetTexturing(true);
 	ChatScreen_DrawChat(s, delta);
-	Gfx_SetTexturing(false);
 }
 
 static void ChatScreen_Free(void* screen) {
@@ -1328,9 +1366,11 @@ void ChatScreen_OpenInput(const cc_string* text) {
 	s->grabsInput        = true;
 
 	Gui_UpdateInputGrab();
-	OpenKeyboardArgs_Init(&args, text, KEYBOARD_TYPE_TEXT);
+	OpenKeyboardArgs_Init(&args, text, KEYBOARD_TYPE_TEXT | KEYBOARD_FLAG_SEND);
 	args.placeholder = "Enter chat";
+	args.multiline   = true;
 	Window_OpenKeyboard(&args);
+	s->input.base.disabled = args.opaque;
 
 	String_Copy(&s->input.base.text, text);
 	InputWidget_UpdateText(&s->input.base);
@@ -1357,8 +1397,39 @@ static struct InventoryScreen {
 	Screen_Body
 	struct FontDesc font;
 	struct TableWidget table;
+	struct TextWidget title;
 	cc_bool releasedInv, deferredSelect;
 } InventoryScreen_Instance;
+
+
+static void InventoryScreen_GetTitleText(cc_string* desc, BlockID block) {
+	cc_string name;
+	int block_ = block;
+	if (Game_PureClassic) { String_AppendConst(desc, "Select block"); return; }
+	if (block == BLOCK_AIR) return;
+
+	name = Block_UNSAFE_GetName(block);
+	String_AppendString(desc, &name);
+	if (Game_ClassicMode) return;
+
+	String_Format1(desc, " (ID %i&f", &block_);
+	if (!Blocks.CanPlace[block])  { String_AppendConst(desc,  ", place &cNo&f"); }
+	if (!Blocks.CanDelete[block]) { String_AppendConst(desc, ", delete &cNo&f"); }
+	String_Append(desc, ')');
+}
+
+static void InventoryScreen_UpdateTitle(struct InventoryScreen* s, BlockID block) {
+	cc_string desc; char descBuffer[STRING_SIZE * 2];
+
+	String_InitArray(desc, descBuffer);
+	InventoryScreen_GetTitleText(&desc, block);
+	TextWidget_Set(&s->title, &desc, &s->font);
+}
+
+static void InventoryScreen_OnUpdateTitle(BlockID block) {
+	InventoryScreen_UpdateTitle(&InventoryScreen_Instance, block);
+}
+
 
 static void InventoryScreen_OnBlockChanged(void* screen) {
 	struct InventoryScreen* s = (struct InventoryScreen*)screen;
@@ -1369,6 +1440,7 @@ static void InventoryScreen_ContextLost(void* screen) {
 	struct InventoryScreen* s = (struct InventoryScreen*)screen;
 	Font_Free(&s->font);
 	Elem_Free(&s->table);
+	Elem_Free(&s->title);
 }
 
 static void InventoryScreen_ContextRecreated(void* screen) {
@@ -1387,16 +1459,17 @@ static void InventoryScreen_MoveToSelected(struct InventoryScreen* s) {
 	s->deferredSelect = false;
 	/* User is holding invalid block */
 	if (table->selectedIndex == -1) {
-		TableWidget_MakeDescTex(table, Inventory_SelectedBlock);
+		InventoryScreen_UpdateTitle(s, Inventory_SelectedBlock);
 	}
 }
 
 static void InventoryScreen_Init(void* screen) {
 	struct InventoryScreen* s = (struct InventoryScreen*)screen;
 	
+	TextWidget_Init(&s->title);
 	TableWidget_Create(&s->table);
-	s->table.font         = &s->font;
 	s->table.blocksPerRow = Inventory.BlocksPerRow;
+	s->table.UpdateTitle   = InventoryScreen_OnUpdateTitle;
 	TableWidget_RecreateBlocks(&s->table);
 
 	/* Can't immediately move to selected here, because cursor grabbed  */
@@ -1412,12 +1485,18 @@ static void InventoryScreen_Render(void* screen, double delta) {
 	struct InventoryScreen* s = (struct InventoryScreen*)screen;
 	if (s->deferredSelect) InventoryScreen_MoveToSelected(s);
 	Elem_Render(&s->table, delta);
+	Elem_Render(&s->title, delta);
 }
 
 static void InventoryScreen_Layout(void* screen) {
 	struct InventoryScreen* s = (struct InventoryScreen*)screen;
 	s->table.scale = Gui_GetInventoryScale();
-	Widget_Layout(&s->table);
+	Widget_SetLocation(&s->table, ANCHOR_CENTRE, ANCHOR_CENTRE, 0, 0);
+
+	Widget_SetLocation(&s->title, ANCHOR_CENTRE, ANCHOR_MIN, 0, 0);
+	/* use Table(Y) directly instead of s->title->height ??? */
+	s->title.yOffset = s->table.y - s->title.height - 3;
+	Widget_Layout(&s->title); /* Needed for yOffset */
 }
 
 static void InventoryScreen_Free(void* screen) {
@@ -1626,7 +1705,6 @@ static void LoadingScreen_Render(void* screen, double delta) {
 	int offset, filledWidth;
 	TextureLoc loc;
 
-	Gfx_SetTexturing(true);
 	Gfx_SetVertexFormat(VERTEX_FORMAT_TEXTURED);
 	Gfx_BindDynamicVb(s->vb);
 
@@ -1641,7 +1719,6 @@ static void LoadingScreen_Render(void* screen, double delta) {
 
 	offset = Widget_Render2(&s->title,   offset);
 	offset = Widget_Render2(&s->message, offset);
-	Gfx_SetTexturing(false);
 
 	filledWidth = (int)(s->progWidth * s->progress);
 	Gfx_Draw2DFlat(s->progX, s->progY, s->progWidth, 
@@ -1702,10 +1779,12 @@ static void GeneratingScreen_Init(void* screen) {
 		Window_ShowDialog("Out of memory", "Not enough free memory to generate a map that large.\nTry a smaller size.");
 		Gen_Done = true;
 	} else if (Gen_Vanilla) {
-		thread = Thread_Start(NotchyGen_Generate);
+		thread = Thread_Create(NotchyGen_Generate);
+		Thread_Start2(thread,  NotchyGen_Generate);
 		Thread_Detach(thread);
 	} else {
-		thread = Thread_Start(FlatgrassGen_Generate);
+		thread = Thread_Create(FlatgrassGen_Generate);
+		Thread_Start2(thread,  FlatgrassGen_Generate);
 		Thread_Detach(thread);
 	}
 	Event_Register_(&TextureEvents.AtlasChanged,   NULL, GeneratingScreen_AtlasChanged);
@@ -1716,19 +1795,14 @@ static void GeneratingScreen_Free(void* screen) {
 }
 
 static void GeneratingScreen_EndGeneration(void) {
-	struct LocalPlayer* p = &LocalPlayer_Instance;
-	float x, z;
-
 	Gen_Done   = false;
 	World_SetNewMap(Gen_Blocks, World.Width, World.Height, World.Length);
 	if (!Gen_Blocks) { Chat_AddRaw("&cFailed to generate the map."); return; }
+
 	Gen_Blocks = NULL;
+	World.Seed = Gen_Seed;
 
-	x = (World.Width / 2) + 0.5f; z = (World.Length / 2) + 0.5f;
-	p->Spawn = Respawn_FindSpawnPosition(x, z, p->Base.Size);
-
-	p->SpawnYaw   = 0.0f;
-	p->SpawnPitch = 0.0f;
+	LocalPlayer_CalcDefaultSpawn();
 	LocalPlayer_MoveToSpawn();
 }
 
@@ -1778,7 +1852,7 @@ static struct DisconnectScreen {
 
 	struct FontDesc titleFont, messageFont;
 	struct TextWidget title, message;
-	char _titleBuffer[STRING_SIZE];
+	char _titleBuffer[STRING_SIZE * 2];
 	char _messageBuffer[STRING_SIZE];
 	cc_string titleStr, messageStr;
 } DisconnectScreen;
@@ -1887,9 +1961,7 @@ static void DisconnectScreen_Render(void* screen, double delta) {
 	PackedCol bottom = PackedCol_Make(80, 16, 16, 255);
 	Gfx_Draw2DGradient(0, 0, WindowInfo.Width, WindowInfo.Height, top, bottom);
 
-	Gfx_SetTexturing(true);
 	Screen_Render2Widgets(screen, delta);
-	Gfx_SetTexturing(false);
 }
 
 static void DisconnectScreen_Free(void* screen) { Game_SetFpsLimit(Game_FpsLimit); }
@@ -1906,6 +1978,7 @@ void DisconnectScreen_Show(const cc_string* title, const cc_string* message) {
 	static const cc_string ban  = String_FromConst("Banned ");
 	cc_string why; char whyBuffer[STRING_SIZE];
 	struct DisconnectScreen* s = &DisconnectScreen;
+	int i;
 
 	s->grabsInput  = true;
 	s->blocksWorld = true;
@@ -1921,9 +1994,13 @@ void DisconnectScreen_Show(const cc_string* title, const cc_string* message) {
 	s->canReconnect = !(String_CaselessStarts(&why, &kick) || String_CaselessStarts(&why, &ban));
 	s->VTABLE       = &DisconnectScreen_VTABLE;
 
-	/* Remove all screens instead of just drawing over them to reduce GPU usage */
-	Gui_RemoveAll();
 	Gui_Add((struct Screen*)s, GUI_PRIORITY_DISCONNECT);
+	/* Remove other screens instead of just drawing over them to reduce GPU usage */
+	for (i = Gui.ScreensCount - 1; i >= 0; i--) 
+	{
+		if (Gui_Screens[i] == (struct Screen*)s) continue;
+		Gui_Remove(Gui_Screens[i]);
+	}
 }
 
 
@@ -2086,9 +2163,7 @@ static void TouchScreen_ContextRecreated(void* screen) {
 
 static void TouchScreen_Render(void* screen, double delta) {
 	if (Gui.InputGrab) return;
-	Gfx_SetTexturing(true);
 	Screen_Render2Widgets(screen, delta);
-	Gfx_SetTexturing(false);
 }
 
 static int TouchScreen_PointerDown(void* screen, int id, int x, int y) {
@@ -2134,12 +2209,8 @@ static void TouchScreen_Layout(void* screen) {
 	struct TouchScreen* s = (struct TouchScreen*)screen;
 	const struct TouchButtonDesc* desc;
 	float scale = Gui.RawTouchScale;
-	int i, height;
+	int i, x, y, height;
 
-	for (i = 0; i < s->numOnscreen; i++) {
-		Widget_SetLocation(&s->onscreen[i], ANCHOR_MAX, ANCHOR_MIN, 10, 10 + i * 40);
-	}
-	Widget_SetLocation(&s->more, ANCHOR_CENTRE, ANCHOR_MIN, 0, 10);
 	/* Need to align these relative to the hotbar */
 	height = HUDScreen_LayoutHotbar();
 
@@ -2153,6 +2224,17 @@ static void TouchScreen_Layout(void* screen) {
 		s->btns[i].minHeight = Display_ScaleY(60 * scale);
 		Widget_Layout(&s->btns[i]);
 	}
+
+	for (i = 0, x = 10, y = 10; i < s->numOnscreen; i++, y += 40) {
+		Widget_SetLocation(&s->onscreen[i], ANCHOR_MAX, ANCHOR_MIN, x, y);
+		if (s->onscreen[i].y + s->onscreen[i].height <= s->btns[0].y) continue;
+
+		// overflowed onto jump/fly buttons, move to next column
+		y = 10;
+		x += 110;
+		Widget_SetLocation(&s->onscreen[i], ANCHOR_MAX, ANCHOR_MIN, x, y);
+	}
+	Widget_SetLocation(&s->more, ANCHOR_CENTRE, ANCHOR_MIN, 0, 10);
 
 	Widget_SetLocation(&s->thumbstick, ANCHOR_MIN, ANCHOR_MAX, 30, 5);
 	s->thumbstick.yOffset += height;

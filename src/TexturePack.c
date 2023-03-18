@@ -15,6 +15,7 @@
 #include "Logger.h"
 #include "Utils.h"
 #include "Chat.h" /* TODO avoid this include */
+#include "Errors.h"
 
 /*########################################################################################################################*
 *------------------------------------------------------TerrainAtlas-------------------------------------------------------*
@@ -55,7 +56,7 @@ static void Atlas_Convert2DTo1D(void) {
 			Bitmap_UNSAFE_CopyBlock(atlasX, atlasY, 0, y * tileSize,
 								&Atlas2D.Bmp, &atlas1D, tileSize);
 		}
-		Gfx_RecreateTexture(&Atlas1D.TexIds[i], &atlas1D, true, Gfx.Mipmaps);
+		Gfx_RecreateTexture(&Atlas1D.TexIds[i], &atlas1D, TEXTURE_FLAG_MANAGED | TEXTURE_FLAG_DYNAMIC, Gfx.Mipmaps);
 	}
 	Mem_Free(atlas1D.scan0);
 }
@@ -92,7 +93,7 @@ static GfxResourceID Atlas_LoadTile_Raw(TextureLoc texLoc, struct Bitmap* elemen
 	if (y >= Atlas2D.RowsCount) return 0;
 
 	Bitmap_UNSAFE_CopyBlock(x * size, y * size, 0, 0, &Atlas2D.Bmp, element, size);
-	return Gfx_CreateTexture(element, false, Gfx.Mipmaps);
+	return Gfx_CreateTexture(element, 0, Gfx.Mipmaps);
 }
 
 GfxResourceID Atlas2D_LoadTile(TextureLoc texLoc) {
@@ -191,31 +192,68 @@ CC_INLINE static void HashUrl(cc_string* key, const cc_string* url) {
 	String_AppendUInt32(key, Utils_CRC32((const cc_uint8*)url->buffer, url->length));
 }
 
-CC_NOINLINE static void MakeCachePath(cc_string* path, const cc_string* url) {
+static cc_bool createdCache, cacheInvalid;
+static cc_bool UseDedicatedCache(cc_string* path, const cc_string* key) {
+	cc_result res;
+	Directory_GetCachePath(path);
+	if (!path->length || cacheInvalid) return false;
+
+	String_AppendConst(path, "/texturecache");
+	res = Directory_Create(path);
+
+	/* Check if something is deleting the cache directory behind our back */
+	/*  (Several users have reported this happening on some Android devices) */
+	if (createdCache && res == 0) {
+		Chat_AddRaw("&cSomething has deleted system managed cache folder");
+		Chat_AddRaw("  &cFalling back to caching to game folder instead..");
+		cacheInvalid = true;
+	}
+	if (res == 0) createdCache = true;
+
+	String_Format1(path, "/%s", key);
+	return !cacheInvalid;
+}
+
+CC_NOINLINE static void MakeCachePath(cc_string* mainPath, cc_string* altPath, const cc_string* url) {
 	cc_string key; char keyBuffer[STRING_INT_CHARS];
 	String_InitArray(key, keyBuffer);
-
 	HashUrl(&key, url);
-	String_Format1(path, "texturecache/%s", &key);
+	
+	if (UseDedicatedCache(mainPath, &key)) {
+		/* If using dedicated cache directory, also fallback to default cache directory */
+		String_Format1(altPath,  "texturecache/%s",  &key);
+	} else {
+		mainPath->length = 0;
+		String_Format1(mainPath, "texturecache/%s",  &key);
+	}
 }
 
 /* Returns non-zero if given URL has been cached */
 static int IsCached(const cc_string* url) {
-	cc_string path; char pathBuffer[FILENAME_SIZE];
-	String_InitArray(path, pathBuffer);
+	cc_string mainPath; char mainBuffer[FILENAME_SIZE];
+	cc_string altPath;  char  altBuffer[FILENAME_SIZE];
+	String_InitArray(mainPath, mainBuffer);
+	String_InitArray(altPath,   altBuffer);
 
-	MakeCachePath(&path, url);
-	return File_Exists(&path);
+	MakeCachePath(&mainPath, &altPath, url);
+	return File_Exists(&mainPath) || (altPath.length && File_Exists(&altPath));
 }
 
 /* Attempts to open the cached data stream for the given url */
 static cc_bool OpenCachedData(const cc_string* url, struct Stream* stream) {
-	cc_string path; char pathBuffer[FILENAME_SIZE];
+	cc_string mainPath; char mainBuffer[FILENAME_SIZE];
+	cc_string altPath;  char  altBuffer[FILENAME_SIZE];
 	cc_result res;
+	String_InitArray(mainPath, mainBuffer);
+	String_InitArray(altPath,   altBuffer);
+	
 
-	String_InitArray(path, pathBuffer);
-	MakeCachePath(&path, url);
-	res = Stream_OpenFile(stream, &path);
+	MakeCachePath(&mainPath, &altPath, url);
+	res = Stream_OpenFile(stream, &mainPath);
+
+	/* try fallback cache if can't find in main cache */
+	if (res == ReturnCode_FileNotFound && altPath.length)
+		res = Stream_OpenFile(stream, &altPath);
 
 	if (res == ReturnCode_FileNotFound) return false;
 	if (res) { Logger_SysWarn2(res, "opening cache for", url); return false; }
@@ -233,8 +271,8 @@ CC_NOINLINE static cc_string GetCachedTag(const cc_string* url, struct StringsBu
 static cc_string GetCachedLastModified(const cc_string* url) {
 	int i;
 	cc_string entry = GetCachedTag(url, &lastModCache);
-	/* Entry used to be a timestamp of C# ticks since 01/01/0001 */
-	/* Check if this is new format */
+	/* Entry used to be a timestamp of C# DateTime ticks since 01/01/0001 */
+	/* Check whether timestamp entry is old or new format */
 	for (i = 0; i < entry.length; i++) {
 		if (entry.buffer[i] < '0' || entry.buffer[i] > '9') return entry;
 	}
@@ -260,17 +298,20 @@ CC_NOINLINE static void SetCachedTag(const cc_string* url, struct StringsBuffer*
 
 /* Updates cached data, ETag, and Last-Modified for the given URL */
 static void UpdateCache(struct HttpRequest* req) {
-	cc_string path, url; char pathBuffer[FILENAME_SIZE];
+	cc_string url, altPath, value;
+	cc_string path; char pathBuffer[FILENAME_SIZE];
 	cc_result res;
 	url = String_FromRawArray(req->url);
 
-	path = String_FromRawArray(req->etag);
-	SetCachedTag(&url, &etagCache, &path, ETAGS_TXT);
-	path = String_FromRawArray(req->lastModified);
-	SetCachedTag(&url, &lastModCache, &path, LASTMOD_TXT);
+	value = String_FromRawArray(req->etag);
+	SetCachedTag(&url, &etagCache,    &value, ETAGS_TXT);
+	value = String_FromRawArray(req->lastModified);
+	SetCachedTag(&url, &lastModCache, &value, LASTMOD_TXT);
 
 	String_InitArray(path, pathBuffer);
-	MakeCachePath(&path, &url);
+	altPath = String_Empty;
+	MakeCachePath(&path, &altPath, &url);
+
 	res = Stream_WriteAllTo(&path, req->data, req->size);
 	if (res) { Logger_SysWarn2(res, "caching", &url); }
 }
@@ -279,29 +320,25 @@ static void UpdateCache(struct HttpRequest* req) {
 /*########################################################################################################################*
 *-------------------------------------------------------TexturePack-------------------------------------------------------*
 *#########################################################################################################################*/
-static char defTexPackBuffer[STRING_SIZE];
 static char textureUrlBuffer[STRING_SIZE];
-static cc_string defTexPack = String_FromArray(defTexPackBuffer);
-cc_string TexturePack_Url   = String_FromArray(textureUrlBuffer);
-static const cc_string defaultZip = String_FromConst("default.zip");
+static char texpackPathBuffer[FILENAME_SIZE];
+
+cc_string TexturePack_Url  = String_FromArray(textureUrlBuffer);
+cc_string TexturePack_Path = String_FromArray(texpackPathBuffer);
+static const cc_string defaultPath = String_FromConst("texpacks/default.zip");
 
 void TexturePack_SetDefault(const cc_string* texPack) {
-	String_Copy(&defTexPack, texPack);
+	TexturePack_Path.length = 0;
+	String_Format1(&TexturePack_Path, "texpacks/%s", texPack);
 	Options_Set(OPT_DEFAULT_TEX_PACK, texPack);
 }
 
-static cc_result ProcessZipEntry(const cc_string* path, struct Stream* stream, struct ZipState* s) {
+static cc_bool SelectZipEntry(const cc_string* path) { return true; }
+static cc_result ProcessZipEntry(const cc_string* path, struct Stream* stream, struct ZipEntry* source) {
 	cc_string name = *path;
 	Utils_UNSAFE_GetFilename(&name);
 	Event_RaiseEntry(&TextureEvents.FileChanged, stream, &name);
 	return 0;
-}
-
-static cc_result ExtractZip(struct Stream* stream) {
-	struct ZipState state;
-	Zip_Init(&state, stream);
-	state.ProcessEntry = ProcessZipEntry;
-	return Zip_Extract(&state);
 }
 
 static cc_result ExtractPng(struct Stream* stream) {
@@ -314,72 +351,77 @@ static cc_result ExtractPng(struct Stream* stream) {
 }
 
 static cc_bool needReload;
-static void ExtractFrom(struct Stream* stream, const cc_string* path) {
+static cc_result ExtractFrom(struct Stream* stream, const cc_string* path) {
 	cc_result res;
 
 	Event_RaiseVoid(&TextureEvents.PackChanged);
 	/* If context is lost, then trying to load textures will just fail */
 	/* So defer loading the texture pack until context is restored */
-	if (Gfx.LostContext) { needReload = true; return; }
+	if (Gfx.LostContext) { needReload = true; return 0; }
 	needReload = false;
 
-	if (String_ContainsConst(path, ".zip")) {
-		res = ExtractZip(stream);
+	res = ExtractPng(stream);
+	if (res == PNG_ERR_INVALID_SIG) {
+		/* file isn't a .png image, probably a .zip archive then */
+		res = Zip_Extract(stream, SelectZipEntry, ProcessZipEntry);
+
 		if (res) Logger_SysWarn2(res, "extracting", path);
-	} else {
-		res = ExtractPng(stream);
-		if (res) Logger_SysWarn2(res, "decoding", path);
+	} else if (res) {
+		Logger_SysWarn2(res, "decoding", path);
 	}
+	return res;
 }
 
-static void ExtractFromFile(const cc_string* filename) {
-	cc_string path; char pathBuffer[FILENAME_SIZE];
+static cc_result ExtractFromFile(const cc_string* path) {
 	struct Stream stream;
 	cc_result res;
 
-	String_InitArray(path, pathBuffer);
-	String_Format1(&path, TEXPACKS_DIR "/%s", filename);
-
-	res = Stream_OpenFile(&stream, &path);
+	res = Stream_OpenFile(&stream, path);
 	if (res) {
 		/* Game shows a dialog if default.zip is missing */
 		Game_DefaultZipMissing |= res == ReturnCode_FileNotFound
-					&& String_CaselessEquals(filename, &defaultZip);
-		Logger_SysWarn2(res, "opening", &path); return; 
+					&& String_CaselessEquals(path, &defaultPath);
+		Logger_SysWarn2(res, "opening", path); 
+		return res; 
 	}
 
-	ExtractFrom(&stream, &path);
-	res = stream.Close(&stream);
-	if (res) { Logger_SysWarn2(res, "closing", &path); }
+	res = ExtractFrom(&stream, path);
+	/* No point logging error for closing readonly file */
+	(void)stream.Close(&stream);
+	return res;
 }
 
-static void ExtractDefault(void) {
-	cc_string texPack = Game_ClassicMode ? defaultZip : defTexPack;
-	ExtractFromFile(&defaultZip);
+static cc_result ExtractDefault(void) {
+	cc_string path = Game_ClassicMode ? defaultPath : TexturePack_Path;
+	cc_result res  = ExtractFromFile(&defaultPath);
 
-	/* in case the user's default texture pack doesn't have all required textures */
-	if (!String_CaselessEquals(&texPack, &defaultZip)) ExtractFromFile(&texPack);
+	/* override default.zip with user's default texture pack */
+	if (!String_CaselessEquals(&path, &defaultPath)) {
+		res = ExtractFromFile(&path);
+	}
+	return res;
 }
 
 static cc_bool usingDefault;
-void TexturePack_ExtractCurrent(cc_bool forceReload) {
+cc_result TexturePack_ExtractCurrent(cc_bool forceReload) {
 	cc_string url = TexturePack_Url;
 	struct Stream stream;
-	cc_result res;
+	cc_result res = 0;
 
 	/* don't pointlessly load default texture pack */
 	if (!usingDefault || forceReload) {
-		ExtractDefault();
+		res = ExtractDefault();
 		usingDefault = true;
 	}
 
 	if (url.length && OpenCachedData(&url, &stream)) {
-		ExtractFrom(&stream, &url);
+		res = ExtractFrom(&stream, &url);
 		usingDefault = false;
 
-		res = stream.Close(&stream);
-		if (res) Logger_SysWarn2(res, "closing cache for", &url);
+		/* No point logging error for closing readonly file */
+		(void)stream.Close(&stream);
 	}
+	return res;
 }
 
 /* Extracts and updates cache for the downloaded texture pack */
@@ -403,14 +445,20 @@ void TexturePack_CheckPending(void) {
 
 	if (item.success) {
 		ApplyDownloaded(&item);
-		Mem_Free(item.data);
 	} else if (item.result) {
-		Logger_Warn(item.result, "trying to download texture pack", Http_DescribeError);
+		Http_LogError("trying to download texture pack", &item);
+	} else if (item.statusCode == 200 || item.statusCode == 304) {
+		/* Empty responses is okay for these status codes, so don't log an error */
+	} else if (item.statusCode == 404) {
+		Chat_AddRaw("&c404 Not Found error when trying to download texture pack");
+		Chat_AddRaw("  &cThe texture pack URL may be incorrect or no longer exist");
+	} else if (item.statusCode == 401 || item.statusCode == 403) {
+		Chat_Add1("&c%i Not Authorised error when trying to download texture pack", &item.statusCode);
+		Chat_AddRaw("  &cThe texture pack URL may not be publicly shared");
 	} else {
-		int status = item.statusCode;
-		if (status == 200 || status == 304) return;
-		Chat_Add1("&c%i error when trying to download texture pack", &status);
+		Chat_Add1("&c%i error when trying to download texture pack", &item.statusCode);
 	}
+	HttpRequest_Free(&item);
 }
 
 /* Asynchronously downloads the given texture pack */
@@ -426,7 +474,7 @@ static void DownloadAsync(const cc_string* url) {
 	}
 
 	Http_TryCancel(TexturePack_ReqID);
-	TexturePack_ReqID = Http_AsyncGetDataEx(url, true, &time, &etag, NULL);
+	TexturePack_ReqID = Http_AsyncGetDataEx(url, HTTP_FLAG_PRIORITY, &time, &etag, NULL);
 }
 
 void TexturePack_Extract(const cc_string* url) {
@@ -437,22 +485,39 @@ void TexturePack_Extract(const cc_string* url) {
 	TexturePack_ExtractCurrent(false);
 }
 
+static struct TextureEntry* entries_head;
+static struct TextureEntry* entries_tail;
+
+void TextureEntry_Register(struct TextureEntry* entry) {
+	LinkedList_Append(entry, entries_head, entries_tail);
+}
+
 
 /*########################################################################################################################*
 *---------------------------------------------------Textures component----------------------------------------------------*
 *#########################################################################################################################*/
-static void OnFileChanged(void* obj, struct Stream* stream, const cc_string* name) {
+static void TerrainPngProcess(struct Stream* stream, const cc_string* name) {
 	struct Bitmap bmp;
-	cc_result res;
-
-	if (!String_CaselessEqualsConst(name, "terrain.png")) return;
-	res = Png_Decode(&bmp, stream);
+	cc_result res = Png_Decode(&bmp, stream);
 
 	if (res) {
 		Logger_SysWarn2(res, "decoding", name);
 		Mem_Free(bmp.scan0);
 	} else if (!Atlas_TryChange(&bmp)) {
 		Mem_Free(bmp.scan0);
+	}
+}
+static struct TextureEntry terrain_entry = { "terrain.png", TerrainPngProcess };
+
+
+static void OnFileChanged(void* obj, struct Stream* stream, const cc_string* name) {
+	struct TextureEntry* e;
+
+	for (e = entries_head; e; e = e->next) {
+		if (!String_CaselessEqualsConst(name, e->filename)) continue;
+
+		e->Callback(stream, name);
+		return;
 	}
 }
 
@@ -467,11 +532,24 @@ static void OnContextRecreated(void* obj) {
 }
 
 static void OnInit(void) {
+	cc_string file;
 	Event_Register_(&TextureEvents.FileChanged,  NULL, OnFileChanged);
 	Event_Register_(&GfxEvents.ContextLost,      NULL, OnContextLost);
 	Event_Register_(&GfxEvents.ContextRecreated, NULL, OnContextRecreated);
 
-	Options_Get(OPT_DEFAULT_TEX_PACK, &defTexPack, "default.zip");
+	TexturePack_Path.length = 0;
+	if (Options_UNSAFE_Get(OPT_DEFAULT_TEX_PACK, &file)) {
+		String_Format1(&TexturePack_Path,      "texpacks/%s", &file);
+	} else {
+		String_AppendString(&TexturePack_Path, &defaultPath);
+	}
+	
+	/* TODO temp hack to fix mobile, need to properly fix */
+	/*  issue is that Drawer2D_Component.Init is called from Launcher,*/
+	/*  which called TextureEntry_Register, whoops*/
+	entries_head = NULL;
+
+	TextureEntry_Register(&terrain_entry);
 	Utils_EnsureDirectory("texpacks");
 	Utils_EnsureDirectory("texturecache");
 	TextureCache_Init();
@@ -487,6 +565,7 @@ static void OnFree(void) {
 	OnContextLost(NULL);
 	Atlas2D_Free();
 	TexturePack_Url.length = 0;
+	entries_head = NULL;
 }
 
 struct IGameComponent Textures_Component = {

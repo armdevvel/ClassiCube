@@ -9,8 +9,7 @@
 #include "Window.h"
 #include "Utils.h"
 #include "Errors.h"
-
-/* POSIX can be shared between Linux/BSD/macOS */
+#include "PackedCol.h"
 #include <errno.h>
 #include <time.h>
 #include <stdlib.h>
@@ -32,14 +31,13 @@
 #include <netdb.h>
 
 #define Socket__Error() errno
-static char* defaultDirectory;
 const cc_result ReturnCode_FileShareViolation = 1000000000; /* TODO: not used apparently */
 const cc_result ReturnCode_FileNotFound     = ENOENT;
 const cc_result ReturnCode_SocketInProgess  = EINPROGRESS;
 const cc_result ReturnCode_SocketWouldBlock = EWOULDBLOCK;
 const cc_result ReturnCode_DirectoryExists  = EEXIST;
 
-/* Platform specific include files (Try to share for UNIX-ish) */
+/* Operating system specific include files */
 #if defined CC_BUILD_DARWIN
 #include <mach/mach_time.h>
 #include <mach-o/dyld.h>
@@ -48,12 +46,20 @@ const cc_result ReturnCode_DirectoryExists  = EEXIST;
 #endif
 #elif defined CC_BUILD_SOLARIS
 #include <sys/filio.h>
+#include <sys/systeminfo.h>
 #elif defined CC_BUILD_BSD
 #include <sys/sysctl.h>
 #elif defined CC_BUILD_HAIKU
 /* TODO: Use load_image/resume_thread instead of fork */
 /* Otherwise opening browser never works because fork fails */
 #include <kernel/image.h>
+#elif defined CC_BUILD_PSP
+/* pspsdk doesn't seem to support IPv6 */
+#undef AF_INET6
+#include <pspkernel.h>
+
+PSP_MODULE_INFO("ClassiCube", PSP_MODULE_USER, 1, 0);
+PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
 #endif
 
 
@@ -92,16 +98,10 @@ cc_uint64 Stopwatch_ElapsedMicroseconds(cc_uint64 beg, cc_uint64 end) {
 	return ((end - beg) * sw_freqMul) / sw_freqDiv;
 }
 
-/* log to android logcat */
-#ifdef CC_BUILD_ANDROID
-#include <android/log.h>
-void Platform_Log(const char* msg, int len) {
-	char tmp[2048 + 1];
-	len = min(len, 2048);
-
-	Mem_Copy(tmp, msg, len); tmp[len] = '\0';
-	__android_log_write(ANDROID_LOG_DEBUG, "ClassiCube", tmp);
-}
+#if defined CC_BUILD_ANDROID
+/* implemented in Platform_Android.c */
+#elif defined CC_BUILD_IOS
+/* implemented in interop_ios.m */
 #else
 void Platform_Log(const char* msg, int len) {
 	write(STDOUT_FILENO, msg,  len);
@@ -150,9 +150,17 @@ cc_uint64 Stopwatch_Measure(void) {
 /*########################################################################################################################*
 *-----------------------------------------------------Directory/File------------------------------------------------------*
 *#########################################################################################################################*/
+#if defined CC_BUILD_ANDROID
+/* implemented in Platform_Android.c */
+#elif defined CC_BUILD_IOS
+/* implemented in interop_ios.m */
+#else
+void Directory_GetCachePath(cc_string* path) { }
+#endif
+
 cc_result Directory_Create(const cc_string* path) {
 	char str[NATIVE_STR_LEN];
-	Platform_EncodeUtf8(str, path);
+	String_EncodeUtf8(str, path);
 	/* read/write/search permissions for owner and group, and with read/search permissions for others. */
 	/* TODO: Is the default mode in all cases */
 	return mkdir(str, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) == -1 ? errno : 0;
@@ -161,7 +169,7 @@ cc_result Directory_Create(const cc_string* path) {
 int File_Exists(const cc_string* path) {
 	char str[NATIVE_STR_LEN];
 	struct stat sb;
-	Platform_EncodeUtf8(str, path);
+	String_EncodeUtf8(str, path);
 	return stat(str, &sb) == 0 && S_ISREG(sb.st_mode);
 }
 
@@ -171,9 +179,9 @@ cc_result Directory_Enum(const cc_string* dirPath, void* obj, Directory_EnumCall
 	DIR* dirPtr;
 	struct dirent* entry;
 	char* src;
-	int len, res;
+	int len, res, is_dir;
 
-	Platform_EncodeUtf8(str, dirPath);
+	String_EncodeUtf8(str, dirPath);
 	dirPtr = opendir(str);
 	if (!dirPtr) return errno;
 
@@ -194,8 +202,19 @@ cc_result Directory_Enum(const cc_string* dirPath, void* obj, Directory_EnumCall
 		len = String_Length(src);
 		String_AppendUtf8(&path, src, len);
 
+#if defined CC_BUILD_HAIKU || defined CC_BUILD_SOLARIS
+		{
+			char full_path[NATIVE_STR_LEN];
+			struct stat sb;
+			String_EncodeUtf8(full_path, &path);
+			is_dir = stat(full_path, &sb) == 0 && S_ISDIR(sb.st_mode);
+		}
+#else
+		is_dir = entry->d_type == DT_DIR;
 		/* TODO: fallback to stat when this fails */
-		if (entry->d_type == DT_DIR) {
+#endif
+
+		if (is_dir) {
 			res = Directory_Enum(&path, obj, callback);
 			if (res) { closedir(dirPtr); return res; }
 		} else {
@@ -211,7 +230,7 @@ cc_result Directory_Enum(const cc_string* dirPath, void* obj, Directory_EnumCall
 
 static cc_result File_Do(cc_file* file, const cc_string* path, int mode) {
 	char str[NATIVE_STR_LEN];
-	Platform_EncodeUtf8(str, path);
+	String_EncodeUtf8(str, path);
 	*file = open(str, mode, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 	return *file == -1 ? errno : 0;
 }
@@ -264,7 +283,7 @@ void Thread_Sleep(cc_uint32 milliseconds) { usleep(milliseconds * 1000); }
 
 #ifdef CC_BUILD_ANDROID
 /* All threads using JNI must detach BEFORE they exit */
-/* (see https://developer.android.com/training/articles/perf-jni */
+/* (see https://developer.android.com/training/articles/perf-jni#threads */
 static void* ExecThread(void* param) {
 	JNIEnv* env;
 	JavaGetCurrentEnv(env);
@@ -280,11 +299,14 @@ static void* ExecThread(void* param) {
 }
 #endif
 
-void* Thread_Start(Thread_StartFunc func) {
-	pthread_t* ptr = (pthread_t*)Mem_Alloc(1, sizeof(pthread_t), "thread");
+void* Thread_Create(Thread_StartFunc func) {
+	return Mem_Alloc(1, sizeof(pthread_t), "thread");
+}
+
+void Thread_Start2(void* handle, Thread_StartFunc func) {
+	pthread_t* ptr = (pthread_t*)handle;
 	int res = pthread_create(ptr, NULL, ExecThread, (void*)func);
 	if (res) Logger_Abort2(res, "Creating thread");
-	return ptr;
 }
 
 void Thread_Detach(void* handle) {
@@ -327,7 +349,7 @@ void Mutex_Unlock(void* handle) {
 struct WaitData {
 	pthread_cond_t  cond;
 	pthread_mutex_t mutex;
-	int signalled;
+	int signalled; /* For when Waitable_Signal is called before Waitable_Wait */
 };
 
 void* Waitable_Create(void) {
@@ -416,28 +438,38 @@ static void FontDirCallback(const cc_string* path, void* obj) {
 void Platform_LoadSysFonts(void) { 
 	int i;
 #if defined CC_BUILD_ANDROID
-	static const cc_string dirs[3] = {
+	static const cc_string dirs[] = {
 		String_FromConst("/system/fonts"),
 		String_FromConst("/system/font"),
 		String_FromConst("/data/fonts"),
 	};
 #elif defined CC_BUILD_NETBSD
-	static const cc_string dirs[3] = {
+	static const cc_string dirs[] = {
 		String_FromConst("/usr/X11R7/lib/X11/fonts"),
 		String_FromConst("/usr/pkg/lib/X11/fonts"),
 		String_FromConst("/usr/pkg/share/fonts")
 	};
+#elif defined CC_BUILD_OPENBSD
+	static const cc_string dirs[] = {
+		String_FromConst("/usr/X11R6/lib/X11/fonts"),
+		String_FromConst("/usr/share/fonts"),
+		String_FromConst("/usr/local/share/fonts")
+	};
 #elif defined CC_BUILD_HAIKU
-	static const cc_string dirs[1] = {
+	static const cc_string dirs[] = {
 		String_FromConst("/system/data/fonts")
 	};
 #elif defined CC_BUILD_DARWIN
-	static const cc_string dirs[2] = {
+	static const cc_string dirs[] = {
 		String_FromConst("/System/Library/Fonts"),
 		String_FromConst("/Library/Fonts")
 	};
+#elif defined CC_BUILD_SERENITY
+	static const cc_string dirs[] = {
+		String_FromConst("/res/fonts")
+	};
 #else
-	static const cc_string dirs[2] = {
+	static const cc_string dirs[] = {
 		String_FromConst("/usr/share/fonts"),
 		String_FromConst("/usr/local/share/fonts")
 	};
@@ -452,20 +484,13 @@ void Platform_LoadSysFonts(void) {
 *---------------------------------------------------------Socket----------------------------------------------------------*
 *#########################################################################################################################*/
 union SocketAddress {
-	struct sockaddr_storage total;
 	struct sockaddr raw;
 	struct sockaddr_in  v4;
+	#ifdef AF_INET6
 	struct sockaddr_in6 v6;
+	struct sockaddr_storage total;
+	#endif
 };
-
-cc_result Socket_Available(cc_socket s, int* available) {
-	return ioctl(s, FIONREAD, available);
-}
-
-cc_result Socket_GetError(cc_socket s, cc_result* result) {
-	socklen_t resultSize = sizeof(cc_result);
-	return getsockopt(s, SOL_SOCKET, SO_ERROR, result, &resultSize);
-}
 
 static int ParseHost(union SocketAddress* addr, const char* host) {
 	struct addrinfo hints = { 0 };
@@ -494,10 +519,12 @@ static int ParseHost(union SocketAddress* addr, const char* host) {
 
 static int ParseAddress(union SocketAddress* addr, const cc_string* address) {
 	char str[NATIVE_STR_LEN];
-	Platform_EncodeUtf8(str, address);
+	String_EncodeUtf8(str, address);
 
 	if (inet_pton(AF_INET,  str, &addr->v4.sin_addr)  > 0) return AF_INET;
+	#ifdef AF_INET6
 	if (inet_pton(AF_INET6, str, &addr->v6.sin6_addr) > 0) return AF_INET6;
+	#endif
 	return ParseHost(addr, str);
 }
 
@@ -507,7 +534,7 @@ int Socket_ValidAddress(const cc_string* address) {
 }
 
 cc_result Socket_Connect(cc_socket* s, const cc_string* address, int port) {
-	int family, addrSize, blocking_raw = -1; /* non-blocking mode */
+	int family, addrSize = 0, blocking_raw = -1; /* non-blocking mode */
 	union SocketAddress addr;
 	cc_result res;
 
@@ -517,13 +544,22 @@ cc_result Socket_Connect(cc_socket* s, const cc_string* address, int port) {
 
 	*s = socket(family, SOCK_STREAM, IPPROTO_TCP);
 	if (*s == -1) return errno;
+	
+	#if defined CC_BUILD_PSP
+	int on = 1;
+	setsockopt(*s, SOL_SOCKET, SO_NONBLOCK, &on, sizeof(int));
+	#else
 	ioctl(*s, FIONBIO, &blocking_raw);
+	#endif
 
+	#ifdef AF_INET6
 	if (family == AF_INET6) {
 		addr.v6.sin6_family = AF_INET6;
 		addr.v6.sin6_port   = htons(port);
 		addrSize = sizeof(addr.v6);
-	} else if (family == AF_INET) {
+	}
+	#endif
+	if (family == AF_INET) {
 		addr.v4.sin_family  = AF_INET;
 		addr.v4.sin_port    = htons(port);
 		addrSize = sizeof(addr.v4);
@@ -545,21 +581,14 @@ cc_result Socket_Write(cc_socket s, const cc_uint8* data, cc_uint32 count, cc_ui
 	*modified = 0; return errno;
 }
 
-cc_result Socket_Close(cc_socket s) {
-	cc_result res = 0;
-	cc_result res1, res2;
-
-	res1 = shutdown(s, SHUT_RDWR);
-	if (res1 == -1) res = errno;
-
-	res2 = close(s);
-	if (res2 == -1) res = errno;
-	return res;
+void Socket_Close(cc_socket s) {
+	shutdown(s, SHUT_RDWR);
+	close(s);
 }
 
-#if defined CC_BUILD_DARWIN
+#if defined CC_BUILD_DARWIN || defined CC_BUILD_PSP
 /* poll is broken on old OSX apparently https://daniel.haxx.se/docs/poll-vs-select.html */
-cc_result Socket_Poll(cc_socket s, int mode, cc_bool* success) {
+static cc_result Socket_Poll(cc_socket s, int mode, cc_bool* success) {
 	fd_set set;
 	struct timeval time = { 0 };
 	int selectCount;
@@ -578,7 +607,7 @@ cc_result Socket_Poll(cc_socket s, int mode, cc_bool* success) {
 }
 #else
 #include <poll.h>
-cc_result Socket_Poll(cc_socket s, int mode, cc_bool* success) {
+static cc_result Socket_Poll(cc_socket s, int mode, cc_bool* success) {
 	struct pollfd pfd;
 	int flags;
 
@@ -593,18 +622,28 @@ cc_result Socket_Poll(cc_socket s, int mode, cc_bool* success) {
 }
 #endif
 
+cc_result Socket_CheckReadable(cc_socket s, cc_bool* readable) {
+	return Socket_Poll(s, SOCKET_POLL_READ, readable);
+}
+
+cc_result Socket_CheckWritable(cc_socket s, cc_bool* writable) {
+	socklen_t resultSize;
+	cc_result res = Socket_Poll(s, SOCKET_POLL_WRITE, writable);
+	if (res || *writable) return res;
+
+	/* https://stackoverflow.com/questions/29479953/so-error-value-after-successful-socket-operation */
+	getsockopt(s, SOL_SOCKET, SO_ERROR, &res, &resultSize);
+	return res;
+}
+
 
 /*########################################################################################################################*
 *-----------------------------------------------------Process/Module------------------------------------------------------*
 *#########################################################################################################################*/
 #if defined CC_BUILD_ANDROID
-static char gameArgsBuffer[512];
-static cc_string gameArgs = String_FromArray(gameArgsBuffer);
-
-cc_result Process_StartGame(const cc_string* args) {
-	String_Copy(&gameArgs, args);
-	return 0; /* TODO: Is there a clean way of handling an error */
-}
+/* implemented in Platform_Android.c */
+#elif defined CC_BUILD_IOS
+/* implemented in interop_ios.m */
 #else
 static cc_result Process_RawStart(const char* path, char** argv) {
 	pid_t pid = fork();
@@ -623,28 +662,22 @@ static cc_result Process_RawStart(const char* path, char** argv) {
 
 static cc_result Process_RawGetExePath(char* path, int* len);
 
-cc_result Process_StartGame(const cc_string* args) {
-	char path[NATIVE_STR_LEN], raw[NATIVE_STR_LEN];
+cc_result Process_StartGame2(const cc_string* args, int numArgs) {
+	char raw[GAME_MAX_CMDARGS][NATIVE_STR_LEN];
+	char path[NATIVE_STR_LEN];
 	int i, j, len = 0;
 	char* argv[15];
 
 	cc_result res = Process_RawGetExePath(path, &len);
 	if (res) return res;
 	path[len] = '\0';
+	argv[0]   = path;
 
-	Platform_EncodeUtf8(raw, args);
-	argv[0] = path; argv[1] = raw;
-
-	/* need to null-terminate multiple arguments */
-	for (i = 0, j = 2; raw[i] && i < Array_Elems(raw); i++) {
-		if (raw[i] != ' ') continue;
-
-		/* null terminate previous argument */
-		raw[i] = '\0';
-		argv[j++] = &raw[i + 1];
+	for (i = 0, j = 1; i < numArgs; i++, j++) {
+		String_EncodeUtf8(raw[i], &args[i]);
+		argv[j] = raw[i];
 	}
 
-	if (defaultDirectory) { argv[j++] = defaultDirectory; }
 	argv[j] = NULL;
 	return Process_RawStart(path, argv);
 }
@@ -653,17 +686,16 @@ void Process_Exit(cc_result code) { exit(code); }
 
 /* Opening browser/starting shell is not really standardised */
 #if defined CC_BUILD_ANDROID
-cc_result Process_StartOpen(const cc_string* args) {
-	JavaCall_String_Void("startOpen", args);
-	return 0;
-}
+/* Implemented in Platform_Android.c */
+#elif defined CC_BUILD_IOS
+/* implemented in interop_ios.m */
 #elif defined CC_BUILD_MACOS
 cc_result Process_StartOpen(const cc_string* args) {
 	UInt8 str[NATIVE_STR_LEN];
 	CFURLRef urlCF;
 	int len;
 	
-	len   = Platform_EncodeUtf8(str, args);
+	len   = String_EncodeUtf8(str, args);
 	urlCF = CFURLCreateWithBytes(kCFAllocatorDefault, str, len, kCFStringEncodingUTF8, NULL);
 	LSOpenCFURLRef(urlCF, NULL);
 	CFRelease(urlCF);
@@ -673,7 +705,7 @@ cc_result Process_StartOpen(const cc_string* args) {
 cc_result Process_StartOpen(const cc_string* args) {
 	char str[NATIVE_STR_LEN];
 	char* cmd[3];
-	Platform_EncodeUtf8(str, args);
+	String_EncodeUtf8(str, args);
 
 	cmd[0] = "open"; cmd[1] = str; cmd[2] = NULL;
 	Process_RawStart("open", cmd);
@@ -683,7 +715,7 @@ cc_result Process_StartOpen(const cc_string* args) {
 cc_result Process_StartOpen(const cc_string* args) {
 	char str[NATIVE_STR_LEN];
 	char* cmd[3];
-	Platform_EncodeUtf8(str, args);
+	String_EncodeUtf8(str, args);
 
 	/* TODO: Can xdg-open be used on original Solaris, or is it just an OpenIndiana thing */
 	cmd[0] = "xdg-open"; cmd[1] = str; cmd[2] = NULL;
@@ -693,7 +725,7 @@ cc_result Process_StartOpen(const cc_string* args) {
 #endif
 
 /* Retrieving exe path is completely OS dependant */
-#if defined CC_BUILD_DARWIN
+#if defined CC_BUILD_MACOS
 static cc_result Process_RawGetExePath(char* path, int* len) {
 	Mem_Set(path, '\0', NATIVE_STR_LEN);
 	cc_uint32 size = NATIVE_STR_LEN;
@@ -703,7 +735,7 @@ static cc_result Process_RawGetExePath(char* path, int* len) {
 	*len = String_CalcLen(path, NATIVE_STR_LEN);
 	return 0;
 }
-#elif defined CC_BUILD_LINUX
+#elif defined CC_BUILD_LINUX || defined CC_BUILD_SERENITY
 static cc_result Process_RawGetExePath(char* path, int* len) {
 	*len = readlink("/proc/self/exe", path, NATIVE_STR_LEN);
 	return *len == -1 ? errno : 0;
@@ -775,44 +807,62 @@ static cc_result Process_RawGetExePath(char* path, int* len) {
 /*########################################################################################################################*
 *--------------------------------------------------------Updater----------------------------------------------------------*
 *#########################################################################################################################*/
+#if defined CC_BUILD_ANDROID
+/* implemented in Platform_Android.c */
+#elif defined CC_BUILD_IOS
+/* implemented in interop_ios.m */
+#else
 const char* const Updater_D3D9 = NULL;
 cc_bool Updater_Clean(void) { return true; }
 
-#if defined CC_BUILD_ANDROID
-const char* const Updater_OGL = NULL;
-
-cc_result Updater_GetBuildTime(cc_uint64* t) {
-	JNIEnv* env;
-	JavaGetCurrentEnv(env);
-	*t = JavaCallLong(env, "getApkUpdateTime", "()J", NULL);
-	return 0;
-}
-
-cc_result Updater_Start(const char** action)   { *action = "Updating game"; return ERR_NOT_SUPPORTED; }
-cc_result Updater_MarkExecutable(void)         { return 0; }
-cc_result Updater_SetNewBuildTime(cc_uint64 t) { return ERR_NOT_SUPPORTED; }
+#if defined CC_BUILD_RPI
+	#if __aarch64__
+	const struct UpdaterInfo Updater_Info = { "", 1, { { "OpenGL ES", "cc-rpi64" } } };
+	#else
+	const struct UpdaterInfo Updater_Info = { "", 1, { { "OpenGL ES", "ClassiCube.rpi" } } };
+	#endif
+#elif defined CC_BUILD_LINUX
+	#if __x86_64__
+	const struct UpdaterInfo Updater_Info = {
+		"&eModernGL is recommended for newer machines (2010 or later)", 2,
+		{
+			{ "ModernGL", "cc-nix64-gl2" },
+			{ "OpenGL",   "ClassiCube" }
+		}
+	};
+	#elif __i386__
+	const struct UpdaterInfo Updater_Info = {
+		"&eModernGL is recommended for newer machines (2010 or later)", 2,
+		{
+			{ "ModernGL", "cc-nix32-gl2" },
+			{ "OpenGL",   "ClassiCube.32" }
+		}
+	};
+	#else
+	const struct UpdaterInfo Updater_Info = { "&eCompile latest source code to update", 0 };
+	#endif
+#elif defined CC_BUILD_MACOS
+	#if __x86_64__
+	const struct UpdaterInfo Updater_Info = {
+		"&eModernGL is recommended for newer machines (2010 or later)", 2,
+		{
+			{ "ModernGL", "cc-osx64-gl2" },
+			{ "OpenGL",   "ClassiCube.64.osx" }
+		}
+	};
+	#elif __i386__
+	const struct UpdaterInfo Updater_Info = {
+		"&eModernGL is recommended for newer machines (2010 or later)", 2,
+		{
+			{ "ModernGL", "cc-osx32-gl2" },
+			{ "OpenGL",   "ClassiCube.osx" }
+		}
+	};
+	#else
+	const struct UpdaterInfo Updater_Info = { "&eCompile latest source code to update", 0 };
+	#endif
 #else
-
-#if defined CC_BUILD_LINUX
-#if __x86_64__
-const char* const Updater_OGL = "ClassiCube";
-#elif __i386__
-const char* const Updater_OGL = "ClassiCube.32";
-#elif CC_BUILD_RPI
-const char* const Updater_OGL = "ClassiCube.rpi";
-#else
-const char* const Updater_OGL = NULL;
-#endif
-#elif defined CC_BUILD_DARWIN
-#if __x86_64__
-const char* const Updater_OGL = "ClassiCube.64.osx";
-#elif __i386__
-const char* const Updater_OGL = "ClassiCube.osx";
-#else
-const char* const Updater_OGL = NULL;
-#endif
-#else
-const char* const Updater_OGL = NULL;
+	const struct UpdaterInfo Updater_Info = { "&eCompile latest source code to update", 0 };
 #endif
 
 cc_result Updater_Start(const char** action) {
@@ -870,13 +920,24 @@ cc_result Updater_SetNewBuildTime(cc_uint64 timestamp) {
 /*########################################################################################################################*
 *-------------------------------------------------------Dynamic lib-------------------------------------------------------*
 *#########################################################################################################################*/
-#if defined MAC_OS_X_VERSION_MIN_REQUIRED && (MAC_OS_X_VERSION_MIN_REQUIRED < 1040)
+#if defined CC_BUILD_PSP
+/* TODO can this actually be supported somehow */
+const cc_string DynamicLib_Ext = String_FromConst(".so");
+
+void* DynamicLib_Load2(const cc_string* path)      { return NULL; }
+void* DynamicLib_Get2(void* lib, const char* name) { return NULL; }
+
+cc_bool DynamicLib_DescribeError(cc_string* dst) {
+	String_AppendConst(dst, "Dynamic linking unsupported");
+	return true;
+}
+#elif defined MAC_OS_X_VERSION_MIN_REQUIRED && (MAC_OS_X_VERSION_MIN_REQUIRED < 1040)
 /* Really old mac OS versions don't have the dlopen/dlsym API */
 const cc_string DynamicLib_Ext = String_FromConst(".dylib");
 
 void* DynamicLib_Load2(const cc_string* path) {
 	char str[NATIVE_STR_LEN];
-	Platform_EncodeUtf8(str, path);
+	String_EncodeUtf8(str, path);
 	return NSAddImage(str, NSADDIMAGE_OPTION_WITH_SEARCHING | 
 							NSADDIMAGE_OPTION_RETURN_ON_ERROR);
 }
@@ -918,7 +979,7 @@ const cc_string DynamicLib_Ext = String_FromConst(".so");
 
 void* DynamicLib_Load2(const cc_string* path) {
 	char str[NATIVE_STR_LEN];
-	Platform_EncodeUtf8(str, path);
+	String_EncodeUtf8(str, path);
 	return dlopen(str, RTLD_NOW);
 }
 
@@ -937,20 +998,6 @@ cc_bool DynamicLib_DescribeError(cc_string* dst) {
 /*########################################################################################################################*
 *--------------------------------------------------------Platform---------------------------------------------------------*
 *#########################################################################################################################*/
-int Platform_EncodeUtf8(void* data, const cc_string* src) {
-	cc_uint8* dst = (cc_uint8*)data;
-	cc_uint8* cur;
-	int i, len = 0;
-	if (src->length > FILENAME_SIZE) Logger_Abort("String too long to expand");
-
-	for (i = 0; i < src->length; i++) {
-		cur = dst + len;
-		len += Convert_CP437ToUtf8(src->buffer[i], cur);
-	}
-	dst[len] = '\0';
-	return len;
-}
-
 static void Platform_InitPosix(void) {
 	signal(SIGCHLD, SIG_IGN);
 	/* So writing to closed socket doesn't raise SIGPIPE */
@@ -992,6 +1039,11 @@ static void Platform_InitStopwatch(void) {
 #if defined CC_BUILD_MACOS
 static void Platform_InitSpecific(void) {
 	ProcessSerialNumber psn = { 0, kCurrentProcess };
+#ifdef __ppc__
+	/* TransformProcessType doesn't work with kCurrentProcess on older macOS */
+	GetCurrentProcess(&psn);
+#endif
+
 	/* NOTE: Call as soon as possible, otherwise can't click on dialog boxes or create windows */
 	/* NOTE: TransformProcessType is macOS 10.3 or later */
 	TransformProcessType(&psn, kProcessTransformToForegroundApplication);
@@ -1064,14 +1116,19 @@ static void DecodeMachineID(char* tmp, int len, cc_uint32* key) {
 }
 
 #if defined CC_BUILD_LINUX
-/* Read /var/lib/dbus/machine-id for the key */
+/* Read /var/lib/dbus/machine-id or /etc/machine-id for the key */
 static cc_result GetMachineID(cc_uint32* key) {
-	const cc_string idFile = String_FromConst("/var/lib/dbus/machine-id");
+	const cc_string idFile  = String_FromConst("/var/lib/dbus/machine-id");
+	const cc_string altFile = String_FromConst("/etc/machine-id");
 	char tmp[MACHINEID_LEN];
 	struct Stream s;
 	cc_result res;
 
-	if ((res = Stream_OpenFile(&s, &idFile))) return res;
+	/* Some machines only have dbus id, others only have etc id */
+	res = Stream_OpenFile(&s, &idFile);
+	if (res) res = Stream_OpenFile(&s, &altFile);
+	if (res) return res;
+
 	res = Stream_Read(&s, tmp, MACHINEID_LEN);
 	if (!res) DecodeMachineID(tmp, MACHINEID_LEN, key);
 
@@ -1151,6 +1208,18 @@ static cc_result GetMachineID(cc_uint32* key) {
 	DecodeMachineID(dirBuffer, dir.length, key);
 	return 0;
 }
+#elif defined CC_BUILD_IOS
+extern void GetDeviceUUID(cc_string* str);
+static cc_result GetMachineID(cc_uint32* key) {
+    cc_string str; char strBuffer[STRING_SIZE];
+    String_InitArray(str, strBuffer);
+    
+    GetDeviceUUID(&str);
+    if (!str.length) return ERR_NOT_SUPPORTED;
+    
+    DecodeMachineID(strBuffer, str.length, key);
+    return 0;
+}
 #else
 static cc_result GetMachineID(cc_uint32* key) { return ERR_NOT_SUPPORTED; }
 #endif
@@ -1208,39 +1277,29 @@ cc_result Platform_Decrypt(const void* data, int len, cc_string* dst) {
 *-----------------------------------------------------Configuration-------------------------------------------------------*
 *#########################################################################################################################*/
 #if defined CC_BUILD_ANDROID
-int Platform_GetCommandLineArgs(int argc, STRING_REF char** argv, cc_string* args) {
-	if (!gameArgs.length) return 0;
-	return String_UNSAFE_Split(&gameArgs, ' ', args, GAME_MAX_CMDARGS);
-}
-
-cc_result Platform_SetDefaultCurrentDirectory(int argc, char **argv) {
-	cc_string dir; char dirBuffer[FILENAME_SIZE + 1];
-	String_InitArray_NT(dir, dirBuffer);
-
-	JavaCall_Void_String("getExternalAppDir", &dir);
-	dir.buffer[dir.length] = '\0';
-	Platform_Log1("EXTERNAL DIR: %s|", &dir);
-	return chdir(dir.buffer) == -1 ? errno : 0;
-}
+/* implemented in Platform_Android.c */
+#elif defined CC_BUILD_IOS
+/* implemented in interop_ios.m */
 #else
 int Platform_GetCommandLineArgs(int argc, STRING_REF char** argv, cc_string* args) {
 	int i, count;
 	argc--; argv++; /* skip executable path argument */
+	
 
-#ifdef CC_BUILD_DARWIN
+	#if defined CC_BUILD_MACOS
 	/* Sometimes a "-psn_0_[number]" argument is added before actual args */
 	if (argc) {
 		static const cc_string psn = String_FromConst("-psn_0_");
 		cc_string arg0 = String_FromReadonly(argv[0]);
 		if (String_CaselessStarts(&arg0, &psn)) { argc--; argv++; }
 	}
-#endif
+	#endif
 
 	count = min(argc, GAME_MAX_CMDARGS);
 	for (i = 0; i < count; i++) {
-		/* -d[directory] argument to change directory data is stored in */
+		/* -d[directory] argument used to change directory data is stored in */
 		if (argv[i][0] == '-' && argv[i][1] == 'd' && argv[i][2]) {
-			--count;
+			Logger_Abort("-d argument no longer supported - cd to desired working directory instead");
 			continue;
 		}
 		args[i] = String_FromReadonly(argv[i]);
@@ -1248,23 +1307,38 @@ int Platform_GetCommandLineArgs(int argc, STRING_REF char** argv, cc_string* arg
 	return count;
 }
 
+/* Detects if the game is running in $HOME directory */
+static cc_bool IsProblematicWorkingDirectory(void) {
+	#ifdef CC_BUILD_MACOS
+	/* TODO: Only change working directory when necessary */
+	/* When running from bundle, working directory is "/" */
+	return true;
+	#else
+	cc_string curDir, homeDir;
+	char path[2048] = { 0 };
+	const char* home;
+
+	getcwd(path, 2048);
+	curDir = String_FromReadonly(path);
+	
+	home = getenv("HOME");
+	if (!home) return false;
+	homeDir = String_FromReadonly(home);
+	
+	if (String_Equals(&curDir, &homeDir)) {
+		Platform_LogConst("Working directory is $HOME! Changing to executable directory..");
+		return true;
+	}
+	return false;
+	#endif
+}
 
 cc_result Platform_SetDefaultCurrentDirectory(int argc, char **argv) {
 	char path[NATIVE_STR_LEN];
 	int i, len = 0;
 	cc_result res;
-
-	for (i = 1; i < argc; ++i) {
-		if (argv[i][0] == '-' && argv[i][1] == 'd' && argv[i][2]) {
-			defaultDirectory = argv[i];
-			break;
-		}
-	}
-
-	if (defaultDirectory) {
-		return chdir(defaultDirectory + 2) == -1 ? errno : 0;
-	}
-
+	if (!IsProblematicWorkingDirectory()) return 0;
+	
 	res = Process_RawGetExePath(path, &len);
 	if (res) return res;
 
@@ -1273,7 +1347,7 @@ cc_result Platform_SetDefaultCurrentDirectory(int argc, char **argv) {
 		if (path[i] == '/') break;
 	}
 
-#ifdef CC_BUILD_DARWIN
+	#ifdef CC_BUILD_MACOS
 	static const cc_string bundle = String_FromConst(".app/Contents/MacOS/");
 	cc_string raw = String_Init(path, len, 0);
 
@@ -1285,121 +1359,10 @@ cc_result Platform_SetDefaultCurrentDirectory(int argc, char **argv) {
 			if (path[i] == '/') break;
 		}
 	}
-#endif
+	#endif
 
 	path[len] = '\0';
 	return chdir(path) == -1 ? errno : 0;
-}
-#endif
-
-/* Android java interop stuff */
-#if defined CC_BUILD_ANDROID
-jclass  App_Class;
-jobject App_Instance;
-JavaVM* VM_Ptr;
-
-/* JNI helpers */
-cc_string JavaGetString(JNIEnv* env, jstring str, char* buffer) {
-	const char* src; int len;
-	cc_string dst;
-	src = (*env)->GetStringUTFChars(env, str, NULL);
-	len = (*env)->GetStringUTFLength(env, str);
-
-	dst.buffer   = buffer;
-	dst.length   = 0;
-	dst.capacity = NATIVE_STR_LEN;
-	String_AppendUtf8(&dst, src, len);
-
-	(*env)->ReleaseStringUTFChars(env, str, src);
-	return dst;
-}
-
-jobject JavaMakeString(JNIEnv* env, const cc_string* str) {
-	cc_uint8 tmp[2048 + 4];
-	cc_uint8* cur;
-	int i, len = 0;
-
-	for (i = 0; i < str->length && len < 2048; i++) {
-		cur = tmp + len;
-		len += Convert_CP437ToUtf8(str->buffer[i], cur);
-	}
-	tmp[len] = '\0';
-	return (*env)->NewStringUTF(env, (const char*)tmp);
-}
-
-jbyteArray JavaMakeBytes(JNIEnv* env, const void* src, cc_uint32 len) {
-	if (!len) return NULL;
-	jbyteArray arr = (*env)->NewByteArray(env, len);
-	(*env)->SetByteArrayRegion(env, arr, 0, len, src);
-	return arr;
-}
-
-void JavaCallVoid(JNIEnv* env, const char* name, const char* sig, jvalue* args) {
-	jmethodID method = (*env)->GetMethodID(env, App_Class, name, sig);
-	(*env)->CallVoidMethodA(env, App_Instance, method, args);
-}
-
-jint JavaCallInt(JNIEnv* env, const char* name, const char* sig, jvalue* args) {
-	jmethodID method = (*env)->GetMethodID(env, App_Class, name, sig);
-	return (*env)->CallIntMethodA(env, App_Instance, method, args);
-}
-
-jlong JavaCallLong(JNIEnv* env, const char* name, const char* sig, jvalue* args) {
-	jmethodID method = (*env)->GetMethodID(env, App_Class, name, sig);
-	return (*env)->CallLongMethodA(env, App_Instance, method, args);
-}
-
-jfloat JavaCallFloat(JNIEnv* env, const char* name, const char* sig, jvalue* args) {
-	jmethodID method = (*env)->GetMethodID(env, App_Class, name, sig);
-	return (*env)->CallFloatMethodA(env, App_Instance, method, args);
-}
-
-jobject JavaCallObject(JNIEnv* env, const char* name, const char* sig, jvalue* args) {
-	jmethodID method = (*env)->GetMethodID(env, App_Class, name, sig);
-	return (*env)->CallObjectMethodA(env, App_Instance, method, args);
-}
-
-void JavaCall_String_Void(const char* name, const cc_string* value) {
-	JNIEnv* env;
-	jvalue args[1];
-	JavaGetCurrentEnv(env);
-
-	args[0].l = JavaMakeString(env, value);
-	JavaCallVoid(env, name, "(Ljava/lang/String;)V", args);
-	(*env)->DeleteLocalRef(env, args[0].l);
-}
-
-static void ReturnString(JNIEnv* env, jobject obj, cc_string* dst) {
-	const jchar* src;
-	jsize len;
-	if (!obj) return;
-
-	src = (*env)->GetStringChars(env,  obj, NULL);
-	len = (*env)->GetStringLength(env, obj);
-	String_AppendUtf16(dst, src, len * 2);
-	(*env)->ReleaseStringChars(env, obj, src);
-	(*env)->DeleteLocalRef(env,     obj);
-}
-
-void JavaCall_Void_String(const char* name, cc_string* dst) {
-	JNIEnv* env;
-	jobject obj;
-	JavaGetCurrentEnv(env);
-
-	obj = JavaCallObject(env, name, "()Ljava/lang/String;", NULL);
-	ReturnString(env, obj, dst);
-}
-
-void JavaCall_String_String(const char* name, const cc_string* arg, cc_string* dst) {
-	JNIEnv* env;
-	jobject obj;
-	jvalue args[1];
-	JavaGetCurrentEnv(env);
-
-	args[0].l = JavaMakeString(env, arg);
-	obj       = JavaCallObject(env, name, "(Ljava/lang/String;)Ljava/lang/String;", args);
-	ReturnString(env, obj, dst);
-	(*env)->DeleteLocalRef(env, args[0].l);
 }
 #endif
 #endif

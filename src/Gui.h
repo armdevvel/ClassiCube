@@ -2,7 +2,7 @@
 #define CC_GUI_H
 #include "Core.h"
 /* Describes and manages 2D GUI elements on screen.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+   Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 
 enum GuiAnchor {
@@ -40,6 +40,8 @@ CC_VAR extern struct _GuiData {
 	cc_bool TabAutocomplete;
 	/* Whether FPS counter (and other info) is shown in top left. */
 	cc_bool ShowFPS;
+	/* Whether classic-style inventory is used */
+	cc_bool ClassicInventory;
 	float RawHotbarScale, RawChatScale, RawInventoryScale;
 	GfxResourceID GuiTex, GuiClassicTex, IconsTex, TouchTex;
 	int DefaultLines;
@@ -225,7 +227,6 @@ void Gui_ShowPauseMenu(void);
 
 void Gui_LayoutAll(void);
 void Gui_RefreshAll(void);
-void Gui_RemoveAll(void);
 void Gui_Refresh(struct Screen* s);
 void Gui_RenderGui(double delta);
 

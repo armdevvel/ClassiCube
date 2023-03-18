@@ -21,7 +21,6 @@
 
 cc_bool EnvRenderer_Legacy, EnvRenderer_Minimal;
 
-#define ENV_SMALL_VERTICES 4096
 static float CalcBlendFactor(float x) {
 	/* return -0.05 + 0.22 * (Math_Log(x) * 0.25f); */
 	double blend = -0.13 + 0.28 * (Math_Log(x) * 0.25);
@@ -41,7 +40,7 @@ static int CalcNumVertices(int axis1Len, int axis2Len) {
 /*########################################################################################################################*
 *------------------------------------------------------------Fog----------------------------------------------------------*
 *#########################################################################################################################*/
-static void CalcFog(float* density, PackedCol* col) {
+static void CalcFog(float* density, PackedCol* color) {
 	Vec3 pos;
 	IVec3 coords;
 	BlockID block;
@@ -57,12 +56,12 @@ static void CalcFog(float* density, PackedCol* col) {
 
 	if (AABB_ContainsPoint(&blockBB, &Camera.CurrentPos) && Blocks.FogDensity[block]) {
 		*density = Blocks.FogDensity[block];
-		*col     = Blocks.FogCol[block];
+		*color   = Blocks.FogCol[block];
 	} else {
 		*density = 0.0f;
 		/* Blend fog and sky together */
 		blend    = CalcBlendFactor((float)Game_ViewDistance);
-		*col     = PackedCol_Lerp(Env.FogCol, Env.SkyCol, blend);
+		*color   = PackedCol_Lerp(Env.FogCol, Env.SkyCol, blend);
 	}
 }
 
@@ -83,7 +82,7 @@ static void UpdateFogMinimal(float fogDensity) {
 	}
 }
 
-static void UpdateFogNormal(float fogDensity, PackedCol fogCol) {
+static void UpdateFogNormal(float fogDensity, PackedCol fogColor) {
 	double density;
 
 	if (fogDensity != 0.0f) {
@@ -105,22 +104,22 @@ static void UpdateFogNormal(float fogDensity, PackedCol fogCol) {
 		Gfx_SetFogMode(FOG_LINEAR);
 		Gfx_SetFogEnd((float)Game_ViewDistance);
 	}
-	Gfx_SetFogCol(fogCol);
+	Gfx_SetFogCol(fogColor);
 	Game_SetViewDistance(Game_UserViewDistance);
 }
 
 void EnvRenderer_UpdateFog(void) {
 	float fogDensity; 
-	PackedCol fogCol;
+	PackedCol fogColor;
 	if (!World.Loaded) return;
 
-	CalcFog(&fogDensity, &fogCol);
-	Gfx_ClearCol(fogCol);
+	CalcFog(&fogDensity, &fogColor);
+	Gfx_ClearCol(fogColor);
 
 	if (EnvRenderer_Minimal) {
 		UpdateFogMinimal(fogDensity);
 	} else {
-		UpdateFogNormal(fogDensity, fogCol);
+		UpdateFogNormal(fogDensity, fogColor);
 	}
 }
 
@@ -138,13 +137,11 @@ void EnvRenderer_RenderClouds(void) {
 
 	Gfx_EnableTextureOffset(offset, 0);
 	Gfx_SetAlphaTest(true);
-	Gfx_SetTexturing(true);
 	Gfx_BindTexture(clouds_tex);
 	Gfx_SetVertexFormat(VERTEX_FORMAT_TEXTURED);
 	Gfx_BindVb(clouds_vb);
 	Gfx_DrawVb_IndexedTris(clouds_vertices);
 	Gfx_SetAlphaTest(false);
-	Gfx_SetTexturing(false);
 	Gfx_DisableTextureOffset();
 }
 
@@ -282,7 +279,6 @@ void EnvRenderer_RenderSkybox(void) {
 	if (!skybox_vb) return;
 
 	Gfx_SetDepthWrite(false);
-	Gfx_SetTexturing(true);
 	Gfx_BindTexture(skybox_tex);
 	Gfx_SetVertexFormat(VERTEX_FORMAT_TEXTURED);
 
@@ -302,7 +298,6 @@ void EnvRenderer_RenderSkybox(void) {
 	Gfx_BindVb(skybox_vb);
 	Gfx_DrawVb_IndexedTris(SKYBOX_COUNT);
 
-	Gfx_SetTexturing(false);
 	Gfx_LoadMatrix(MATRIX_VIEW, &Gfx.View);
 	Gfx_SetDepthWrite(true);
 }
@@ -533,7 +528,6 @@ static TextureLoc edges_lastTexLoc, sides_lastTexLoc;
 static void RenderBorders(BlockID block, GfxResourceID vb, GfxResourceID tex, int count) {
 	if (!vb) return;
 
-	Gfx_SetTexturing(true);
 	Gfx_SetupAlphaState(Blocks.Draw[block]);
 	Gfx_EnableMipmaps();
 
@@ -544,7 +538,6 @@ static void RenderBorders(BlockID block, GfxResourceID vb, GfxResourceID tex, in
 
 	Gfx_DisableMipmaps();
 	Gfx_RestoreAlphaState(Blocks.Draw[block]);
-	Gfx_SetTexturing(false);
 }
 
 void EnvRenderer_RenderMapSides(void) {
@@ -591,7 +584,7 @@ static void UpdateBorderTextures(void) {
 #define Borders_HorOffset(block) (Blocks.RenderMinBB[block].X - Blocks.MinBB[block].X)
 #define Borders_YOffset(block)   (Blocks.RenderMinBB[block].Y - Blocks.MinBB[block].Y)
 
-static void DrawBorderX(int x, int z1, int z2, int y1, int y2, PackedCol col, struct VertexTextured** vertices) {
+static void DrawBorderX(int x, int z1, int z2, int y1, int y2, PackedCol color, struct VertexTextured** vertices) {
 	int endZ = z2, endY = y2, startY = y1, axisSize = EnvRenderer_AxisSize();
 	float u2, v2;
 	struct VertexTextured* v = *vertices;
@@ -605,16 +598,16 @@ static void DrawBorderX(int x, int z1, int z2, int y1, int y2, PackedCol col, st
 			if (y2 > endY) y2 = endY;
 
 			u2   = (float)z2 - (float)z1;      v2   = (float)y2 - (float)y1;
-			v->X = (float)x; v->Y = (float)y1; v->Z = (float)z1; v->Col = col; v->U = 0;  v->V = v2; v++;
-			v->X = (float)x; v->Y = (float)y2; v->Z = (float)z1; v->Col = col; v->U = 0;  v->V = 0;  v++;
-			v->X = (float)x; v->Y = (float)y2; v->Z = (float)z2; v->Col = col; v->U = u2; v->V = 0;  v++;
-			v->X = (float)x; v->Y = (float)y1; v->Z = (float)z2; v->Col = col; v->U = u2; v->V = v2; v++;
+			v->X = (float)x; v->Y = (float)y1; v->Z = (float)z1; v->Col = color; v->U = 0;  v->V = v2; v++;
+			v->X = (float)x; v->Y = (float)y2; v->Z = (float)z1; v->Col = color; v->U = 0;  v->V = 0;  v++;
+			v->X = (float)x; v->Y = (float)y2; v->Z = (float)z2; v->Col = color; v->U = u2; v->V = 0;  v++;
+			v->X = (float)x; v->Y = (float)y1; v->Z = (float)z2; v->Col = color; v->U = u2; v->V = v2; v++;
 		}
 	}
 	*vertices = v;
 }
 
-static void DrawBorderZ(int z, int x1, int x2, int y1, int y2, PackedCol col, struct VertexTextured** vertices) {
+static void DrawBorderZ(int z, int x1, int x2, int y1, int y2, PackedCol color, struct VertexTextured** vertices) {
 	int endX = x2, endY = y2, startY = y1, axisSize = EnvRenderer_AxisSize();
 	float u2, v2;
 	struct VertexTextured* v = *vertices;
@@ -628,16 +621,16 @@ static void DrawBorderZ(int z, int x1, int x2, int y1, int y2, PackedCol col, st
 			if (y2 > endY) y2 = endY;
 
 			u2   = (float)x2 - (float)x1;       v2   = (float)y2 - (float)y1;
-			v->X = (float)x1; v->Y = (float)y1; v->Z = (float)z; v->Col = col; v->U = 0;  v->V = v2; v++;
-			v->X = (float)x1; v->Y = (float)y2; v->Z = (float)z; v->Col = col; v->U = 0;  v->V = 0;  v++;
-			v->X = (float)x2; v->Y = (float)y2; v->Z = (float)z; v->Col = col; v->U = u2; v->V = 0;  v++;
-			v->X = (float)x2; v->Y = (float)y1; v->Z = (float)z; v->Col = col; v->U = u2; v->V = v2; v++;
+			v->X = (float)x1; v->Y = (float)y1; v->Z = (float)z; v->Col = color; v->U = 0;  v->V = v2; v++;
+			v->X = (float)x1; v->Y = (float)y2; v->Z = (float)z; v->Col = color; v->U = 0;  v->V = 0;  v++;
+			v->X = (float)x2; v->Y = (float)y2; v->Z = (float)z; v->Col = color; v->U = u2; v->V = 0;  v++;
+			v->X = (float)x2; v->Y = (float)y1; v->Z = (float)z; v->Col = color; v->U = u2; v->V = v2; v++;
 		}
 	}
 	*vertices = v;
 }
 
-static void DrawBorderY(int x1, int z1, int x2, int z2, float y, PackedCol col, float offset, float yOffset, struct VertexTextured** vertices) {
+static void DrawBorderY(int x1, int z1, int x2, int z2, float y, PackedCol color, float offset, float yOffset, struct VertexTextured** vertices) {
 	int endX = x2, endZ = z2, startZ = z1, axisSize = EnvRenderer_AxisSize();
 	float u2, v2;
 	struct VertexTextured* v = *vertices;
@@ -652,10 +645,10 @@ static void DrawBorderY(int x1, int z1, int x2, int z2, float y, PackedCol col, 
 			if (z2 > endZ) z2 = endZ;
 
 			u2   = (float)x2 - (float)x1;         v2   = (float)z2 - (float)z1;
-			v->X = (float)x1 + offset; v->Y = yy; v->Z = (float)z1 + offset; v->Col = col; v->U = 0;  v->V = 0;  v++;
-			v->X = (float)x1 + offset; v->Y = yy; v->Z = (float)z2 + offset; v->Col = col; v->U = 0;  v->V = v2; v++;
-			v->X = (float)x2 + offset; v->Y = yy; v->Z = (float)z2 + offset; v->Col = col; v->U = u2; v->V = v2; v++;
-			v->X = (float)x2 + offset; v->Y = yy; v->Z = (float)z1 + offset; v->Col = col; v->U = u2; v->V = 0;  v++;
+			v->X = (float)x1 + offset; v->Y = yy; v->Z = (float)z1 + offset; v->Col = color; v->U = 0;  v->V = 0;  v++;
+			v->X = (float)x1 + offset; v->Y = yy; v->Z = (float)z2 + offset; v->Col = color; v->U = 0;  v->V = v2; v++;
+			v->X = (float)x2 + offset; v->Y = yy; v->Z = (float)z2 + offset; v->Col = color; v->U = u2; v->V = v2; v++;
+			v->X = (float)x2 + offset; v->Y = yy; v->Z = (float)z1 + offset; v->Col = color; v->U = u2; v->V = 0;  v++;
 		}
 	}
 	*vertices = v;
@@ -664,7 +657,7 @@ static void DrawBorderY(int x1, int z1, int x2, int z2, float y, PackedCol col, 
 static void UpdateMapSides(void) {
 	Rect2D rects[4], r;
 	BlockID block;
-	PackedCol col, white = PACKEDCOL_WHITE;
+	PackedCol color;
 	int y, y1, y2;
 	int i;
 	struct VertexTextured* data;
@@ -690,12 +683,12 @@ static void UpdateMapSides(void) {
 										VERTEX_FORMAT_TEXTURED, sides_vertices);
 
 	sides_fullBright = Blocks.FullBright[block];
-	col = sides_fullBright ? white : Env.ShadowCol;
-	Block_Tint(col, block)
+	color = sides_fullBright ? PACKEDCOL_WHITE : Env.ShadowCol;
+	Block_Tint(color, block)
 
 	for (i = 0; i < 4; i++) {
 		r = rects[i];
-		DrawBorderY(r.X, r.Y, r.X + r.Width, r.Y + r.Height, (float)y, col,
+		DrawBorderY(r.X, r.Y, r.X + r.Width, r.Y + r.Height, (float)y, color,
 			0, Borders_YOffset(block), &data);
 	}
 
@@ -703,11 +696,11 @@ static void UpdateMapSides(void) {
 	y1 = 0; y2 = y;
 	if (y < 0) { y1 = y; y2 = 0; }
 
-	DrawBorderY(0, 0, World.Width, World.Length, 0, col, 0, 0, &data);
-	DrawBorderZ(0, 0, World.Width, y1, y2, col, &data);
-	DrawBorderZ(World.Length, 0, World.Width, y1, y2, col, &data);
-	DrawBorderX(0, 0, World.Length, y1, y2, col, &data);
-	DrawBorderX(World.Width, 0, World.Length, y1, y2, col, &data);
+	DrawBorderY(0, 0, World.Width, World.Length, 0, color, 0, 0, &data);
+	DrawBorderZ(0, 0, World.Width, y1, y2, color, &data);
+	DrawBorderZ(World.Length, 0, World.Width, y1, y2, color, &data);
+	DrawBorderX(0, 0, World.Length, y1, y2, color, &data);
+	DrawBorderX(World.Width, 0, World.Length, y1, y2, color, &data);
 
 	Gfx_UnlockVb(sides_vb);
 }
@@ -715,7 +708,7 @@ static void UpdateMapSides(void) {
 static void UpdateMapEdges(void) {
 	Rect2D rects[4], r;
 	BlockID block;
-	PackedCol col, white = PACKEDCOL_WHITE;
+	PackedCol color;
 	float y;
 	int i;
 	struct VertexTextured* data;
@@ -736,13 +729,13 @@ static void UpdateMapEdges(void) {
 										VERTEX_FORMAT_TEXTURED, edges_vertices);
 
 	edges_fullBright = Blocks.FullBright[block];
-	col = edges_fullBright ? white : Env.SunCol;
-	Block_Tint(col, block)
+	color = edges_fullBright ? PACKEDCOL_WHITE : Env.SunCol;
+	Block_Tint(color, block)
 
 	y = (float)Env.EdgeHeight;
 	for (i = 0; i < 4; i++) {
 		r = rects[i];
-		DrawBorderY(r.X, r.Y, r.X + r.Width, r.Y + r.Height, y, col,
+		DrawBorderY(r.X, r.Y, r.X + r.Width, r.Y + r.Height, y, color,
 			Borders_HorOffset(block), Borders_YOffset(block), &data);
 	}
 	Gfx_UnlockVb(edges_vb);
@@ -752,6 +745,27 @@ static void UpdateMapEdges(void) {
 /*########################################################################################################################*
 *---------------------------------------------------------General---------------------------------------------------------*
 *#########################################################################################################################*/
+static void CloudsPngProcess(struct Stream* stream, const cc_string* name) {
+	Game_UpdateTexture(&clouds_tex, stream, name, NULL);
+}
+static struct TextureEntry clouds_entry = { "clouds.png", CloudsPngProcess };
+
+static void SkyboxPngProcess(struct Stream* stream, const cc_string* name) {
+	Game_UpdateTexture(&skybox_tex, stream, name, NULL);
+}
+static struct TextureEntry skybox_entry = { "skybox.png", SkyboxPngProcess };
+
+static void SnowPngProcess(struct Stream* stream, const cc_string* name) {
+	Game_UpdateTexture(&snow_tex, stream, name, NULL);
+}
+static struct TextureEntry snow_entry = { "snow.png", SnowPngProcess };
+
+static void RainPngProcess(struct Stream* stream, const cc_string* name) {
+	Game_UpdateTexture(&rain_tex, stream, name, NULL);
+}
+static struct TextureEntry rain_entry = { "rain.png", RainPngProcess };
+
+
 static void DeleteVbs(void) {
 	Gfx_DeleteVb(&sky_vb);
 	Gfx_DeleteVb(&clouds_vb);
@@ -801,26 +815,16 @@ void EnvRenderer_SetMode(int flags) {
 }
 
 int EnvRenderer_CalcFlags(const cc_string* mode) {
-	if (String_CaselessEqualsConst(mode, "legacyfast")) return ENV_LEGACY | ENV_MINIMAL;
-	if (String_CaselessEqualsConst(mode, "legacy"))     return ENV_LEGACY;
-	if (String_CaselessEqualsConst(mode, "normal"))     return 0;
+	if (String_CaselessEqualsConst(mode, "normal")) return 0;
+	if (String_CaselessEqualsConst(mode, "legacy")) return ENV_LEGACY;
+	if (String_CaselessEqualsConst(mode, "fast"))   return ENV_MINIMAL;
+	/* backwards compatibility */
 	if (String_CaselessEqualsConst(mode, "normalfast")) return ENV_MINIMAL;
+	if (String_CaselessEqualsConst(mode, "legacyfast")) return ENV_LEGACY | ENV_MINIMAL;
 
 	return -1;
 }
 
-
-static void OnFileChanged(void* obj, struct Stream* src, const cc_string* name) {
-	if (String_CaselessEqualsConst(name, "clouds.png")) {
-		Game_UpdateTexture(&clouds_tex, src, name, NULL);
-	} else if (String_CaselessEqualsConst(name, "skybox.png")) {
-		Game_UpdateTexture(&skybox_tex, src, name, NULL);
-	} else if (String_CaselessEqualsConst(name, "snow.png")) {
-		Game_UpdateTexture(&snow_tex, src, name, NULL);
-	} else if (String_CaselessEqualsConst(name, "rain.png")) {
-		Game_UpdateTexture(&rain_tex, src, name, NULL);
-	}
-}
 
 static void OnTexturePackChanged(void* obj) {
 	/* TODO: Find better way, really should delete them all here */
@@ -839,20 +843,20 @@ static void OnEnvVariableChanged(void* obj, int envVar) {
 	} else if (envVar == ENV_VAR_EDGE_HEIGHT || envVar == ENV_VAR_SIDES_OFFSET) {
 		UpdateMapEdges();
 		UpdateMapSides();
-	} else if (envVar == ENV_VAR_SUN_COL) {
+	} else if (envVar == ENV_VAR_SUN_COLOR) {
 		UpdateMapEdges();
-	} else if (envVar == ENV_VAR_SHADOW_COL) {
+	} else if (envVar == ENV_VAR_SHADOW_COLOR) {
 		UpdateMapSides();
-	} else if (envVar == ENV_VAR_SKY_COL) {
+	} else if (envVar == ENV_VAR_SKY_COLOR) {
 		UpdateSky();
-	} else if (envVar == ENV_VAR_FOG_COL) {
+	} else if (envVar == ENV_VAR_FOG_COLOR) {
 		EnvRenderer_UpdateFog();
-	} else if (envVar == ENV_VAR_CLOUDS_COL) {
+	} else if (envVar == ENV_VAR_CLOUDS_COLOR) {
 		UpdateClouds();
 	} else if (envVar == ENV_VAR_CLOUDS_HEIGHT) {
 		UpdateSky();
 		UpdateClouds();
-	} else if (envVar == ENV_VAR_SKYBOX_COL) {
+	} else if (envVar == ENV_VAR_SKYBOX_COLOR) {
 		UpdateSkybox();
 	}
 }
@@ -871,7 +875,11 @@ static void OnInit(void) {
 	EnvRenderer_Legacy  = flags & ENV_LEGACY;
 	EnvRenderer_Minimal = flags & ENV_MINIMAL;
 
-	Event_Register_(&TextureEvents.FileChanged,  NULL, OnFileChanged);
+	TextureEntry_Register(&clouds_entry);
+	TextureEntry_Register(&skybox_entry);
+	TextureEntry_Register(&snow_entry);
+	TextureEntry_Register(&rain_entry);
+
 	Event_Register_(&TextureEvents.PackChanged,  NULL, OnTexturePackChanged);
 	Event_Register_(&TextureEvents.AtlasChanged, NULL, OnTerrainAtlasChanged);
 

@@ -1,12 +1,16 @@
 package com.classicube;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -18,10 +22,11 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.res.Configuration;
+import android.database.Cursor;
 import android.graphics.PixelFormat;
 import android.net.Uri;
 import android.os.Bundle;
-import android.os.StrictMode;
+import android.provider.OpenableColumns;
 import android.provider.Settings.Secure;
 import android.text.Editable;
 import android.text.InputType;
@@ -29,8 +34,6 @@ import android.text.Selection;
 import android.text.SpannableStringBuilder;
 import android.util.DisplayMetrics;
 import android.util.Log;
-import android.view.Display;
-import android.view.InputQueue;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
@@ -38,12 +41,10 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.WindowManager;
 import android.view.View;
-import android.view.ViewTreeObserver.OnGlobalLayoutListener;
 import android.view.Window;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
-import android.view.inputmethod.InputMethod;
 import android.view.inputmethod.InputMethodManager;
 
 // This class contains all the glue/interop code for bridging ClassiCube to the java Android world.
@@ -54,17 +55,18 @@ import android.view.inputmethod.InputMethodManager;
 //   was added in, as this will make things easier if the minimum required API level is ever changed again
 
 // implements InputQueue.Callback
-public class MainActivity extends Activity {
-	
-	// ======================================
-	// -------------- COMMANDS --------------
-	// ======================================
+public class MainActivity extends Activity 
+{
+	// ==================================================================
+	// ---------------------------- COMMANDS ----------------------------
+	// ==================================================================
 	//  The main thread (which receives events) is separate from the game thread (which processes events)
 	//  Therefore pushing/pulling events must be thread-safe, which is achieved through ConcurrentLinkedQueue
 	//  Additionally, a cache is used (freeCmds) to avoid constantly allocating NativeCmdArgs instances
 	class NativeCmdArgs { public int cmd, arg1, arg2, arg3, arg4; public String str; public Surface sur; }
-	Queue<NativeCmdArgs> pending  = new ConcurrentLinkedQueue<NativeCmdArgs>();
-	Queue<NativeCmdArgs> freeCmds = new ConcurrentLinkedQueue<NativeCmdArgs>();
+	// static to persist across activity destroy/create
+	static Queue<NativeCmdArgs> pending  = new ConcurrentLinkedQueue<NativeCmdArgs>();
+	static Queue<NativeCmdArgs> freeCmds = new ConcurrentLinkedQueue<NativeCmdArgs>();
 	
 	NativeCmdArgs getCmdArgs() {
 		NativeCmdArgs args = freeCmds.poll();
@@ -109,12 +111,10 @@ public class MainActivity extends Activity {
 	}
 	
 	final static int CMD_KEY_DOWN = 0;
-	
-	final static int CMD_POINTER_DOWN = 3;
-	final static int CMD_POINTER_UP   = 4;
 	final static int CMD_KEY_UP   = 1;
 	final static int CMD_KEY_CHAR = 2;
-	final static int CMD_KEY_TEXT = 19;
+	final static int CMD_POINTER_DOWN = 3;
+	final static int CMD_POINTER_UP   = 4;
 	final static int CMD_POINTER_MOVE = 5;
 	
 	final static int CMD_WIN_CREATED   = 6;
@@ -132,12 +132,17 @@ public class MainActivity extends Activity {
 	final static int CMD_LOST_FOCUS  = 16;
 	final static int CMD_CONFIG_CHANGED = 17;
 	final static int CMD_LOW_MEMORY  = 18;
+
+	final static int CMD_KEY_TEXT   = 19;
+	final static int CMD_OFD_RESULT = 20;
 	
-	// ======================================
-	// --------------- EVENTS ---------------
-	// ======================================
-	static boolean gameRunning;
+	
+	// ====================================================================
+	// ------------------------------ EVENTS ------------------------------
+	// ====================================================================
 	InputMethodManager input;
+	// static to persist across activity destroy/create
+	static boolean gameRunning;
 
 	void startGameAsync() {
 		Log.i("CC_WIN", "handing off to native..");
@@ -151,19 +156,6 @@ public class MainActivity extends Activity {
 		
 		gameRunning = true;
 		runGameAsync();
-	}
-	
-	void HACK_avoidFileUriExposedErrors() {
-		// StrictMode - API level 9
-		// disableDeathOnFileUriExposure - API level 24 ?????
-		try {
-			Method m = StrictMode.class.getMethod("disableDeathOnFileUriExposure");
-			m.invoke(null);
-		}  catch (NoClassDefFoundError ex) {
-			ex.printStackTrace();
-		} catch (Exception ex) {
-			ex.printStackTrace();
-		}
 	}
 	
 	@Override
@@ -180,12 +172,16 @@ public class MainActivity extends Activity {
 		window.setFormat(PixelFormat.RGBX_8888);
 		window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
 		requestWindowFeature(Window.FEATURE_NO_TITLE);
+		// TODO: rendering over display cutouts causes a problem where opening onscreen keyboard
+		//  stops resizing the game view. (e.g. meaning you can't see in-game chat input anymore)
+		//  Apparently intentional (see LayoutParams.SOFT_INPUT_ADJUST_RESIZE documentation)
+		// Need to find a solution that both renders over display cutouts and doesn't mess up onscreen input
+		// renderOverDisplayCutouts();
 		// TODO: semaphore for destroyed and surfaceDestroyed
 
-		// avoid FileUriExposed exception when taking screenshots on recent Android versions
-		HACK_avoidFileUriExposedErrors();
-
 		if (!gameRunning) startGameAsync();
+		// TODO rethink to avoid this
+		if (gameRunning) updateInstance();
 		super.onCreate(savedInstanceState);
 	}
 
@@ -307,6 +303,7 @@ public class MainActivity extends Activity {
 	public void onDestroy() {
 		Log.i("CC_WIN", "APP DESTROYED");
 		super.onDestroy();
+		pushCmd(CMD_APP_DESTROY);
 	}
 	
 	// Called by the game thread to actually process events
@@ -340,6 +337,8 @@ public class MainActivity extends Activity {
 			case CMD_LOST_FOCUS:	 processOnLostFocus();	 break;
 			//case CMD_CONFIG_CHANGED: processOnConfigChanged(); break;
 			case CMD_LOW_MEMORY:	 processOnLowMemory();	 break;
+
+			case CMD_OFD_RESULT: processOFDResult(c.str); break;
 			}
 
 			c.str = null;
@@ -372,14 +371,19 @@ public class MainActivity extends Activity {
 	native void processOnLostFocus();
 	//native void processOnConfigChanged();
 	native void processOnLowMemory();
+
+	native void processOFDResult(String path);
 	
 	native void runGameAsync();
+	native void updateInstance();
 	
-	// ======================================
-	// --------------- VIEWS ----------------
-	// ======================================
+	
+	// ====================================================================
+	// ------------------------------ VIEWS -------------------------------
+	// ====================================================================
 	volatile boolean fullscreen;
-	final Semaphore winDestroyedSem = new Semaphore(0, true);
+	// static to persist across activity destroy/create
+	static final Semaphore winDestroyedSem = new Semaphore(0, true);
 	SurfaceHolder.Callback callback;
 	CCView curView;
 	
@@ -474,7 +478,7 @@ public class MainActivity extends Activity {
 			// BaseInputConnection, IME_ACTION_GO, IME_FLAG_NO_EXTRACT_UI - API level 3
 			attrs.actionLabel = null;
 			attrs.inputType   = MainActivity.this.getKeyboardType();
-			attrs.imeOptions  = EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
+			attrs.imeOptions  = MainActivity.this.getKeyboardOptions();
 
 			kbText = new SpannableStringBuilder(MainActivity.this.keyboardText);
 
@@ -548,9 +552,10 @@ public class MainActivity extends Activity {
 		}
 	}
 	
-	// ======================================
-	// -------------- PLATFORM --------------
-	// ======================================
+	
+	// ==================================================================
+	// ---------------------------- PLATFORM ----------------------------
+	// ==================================================================
 	//  Implements java Android side of the Android Platform backend (See Platform.c)
 	public void setupForGame() {
 		// Once a surface has been locked for drawing with canvas, can't ever be detached
@@ -571,9 +576,20 @@ public class MainActivity extends Activity {
 		}
 	}
 	
-	public String getExternalAppDir() {
+	public String getGameDataDirectory() {
 		// getExternalFilesDir - API level 8
 		return getExternalFilesDir(null).getAbsolutePath();
+	}
+
+	public String getGameCacheDirectory() {
+		// getExternalCacheDir - API level 8
+		File root = getExternalCacheDir();
+		if (root != null) return root.getAbsolutePath();
+
+		// although exceedingly rare, getExternalCacheDir() can technically fail
+		//   "... May return null if shared storage is not currently available."
+		// getCacheDir - API level 1
+		return getCacheDir().getAbsolutePath();
 	}
 	
 	public String getUUID() {
@@ -595,19 +611,20 @@ public class MainActivity extends Activity {
 			return 0;
 		}
 	}
+	
 
-	// ======================================
-	// --------------- WINDOW ---------------
-	// ======================================
+	// ====================================================================
+	// ------------------------------ WINDOW ------------------------------
+	// ====================================================================
 	//  Implements java Android side of the Android Window backend (See Window.c)
 	volatile int keyboardType;
 	volatile String keyboardText = "";
 	// setTitle - API level 1
 	public void setWindowTitle(String str) { setTitle(str); }
 
-	public void openKeyboard(String text, int type) {
+	public void openKeyboard(String text, int flags) {
 		// restartInput, showSoftInput - API level 3
-		keyboardType = type;
+		keyboardType = flags;
 		keyboardText = text;
 		//runOnUiThread(new Runnable() {
 			//public void run() {
@@ -653,9 +670,21 @@ public class MainActivity extends Activity {
 
 	public int getKeyboardType() {
 		// TYPE_CLASS_TEXT, TYPE_CLASS_NUMBER, TYPE_TEXT_VARIATION_PASSWORD - API level 3
-		if (keyboardType == 2) return InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD;
-		if (keyboardType == 1) return InputType.TYPE_CLASS_NUMBER;
+		int type = keyboardType & 0xFF;
+		
+		if (type == 2) return InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD;
+		if (type == 1) return InputType.TYPE_CLASS_NUMBER; // KEYBOARD_TYPE_NUMERIC
+		if (type == 3) return InputType.TYPE_CLASS_NUMBER; // KEYBOARD_TYPE_INTEGER
 		return InputType.TYPE_CLASS_TEXT;
+	}
+	
+	public int getKeyboardOptions() {
+		// IME_ACTION_GO, IME_FLAG_NO_EXTRACT_UI - API level 3
+		if ((keyboardType & 0x100) != 0) {
+			return EditorInfo.IME_ACTION_SEND | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
+		} else {
+			return EditorInfo.IME_ACTION_GO   | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
+		}
 	}
 
 	public String getClipboardText() {
@@ -686,9 +715,25 @@ public class MainActivity extends Activity {
 	final Semaphore dialogSem = new Semaphore(0, true);
 	
 	void releaseDialogSem() {
-		// Only release when no free permits (otherwise showAlert doesn't block when called)
-		if (dialogSem.availablePermits() > 0) return;
+		// Only release when no waiting threads (otherwise showAlert doesn't block when called)
+		if (!dialogSem.hasQueuedThreads()) return;
 		dialogSem.release();
+	}
+
+	void renderOverDisplayCutouts() {
+		// FLAG_TRANSLUCENT_STATUS - API level 19
+		// layoutInDisplayCutoutMode - API level 28
+		// LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES - API level 28
+		try {
+			Window window = getWindow();
+			window.addFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS);
+			window.getAttributes().layoutInDisplayCutoutMode =
+				WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+		} catch (NoSuchFieldError ex) {
+			ex.printStackTrace();
+		} catch (NoSuchMethodError ex) {
+			ex.printStackTrace();
+		}
 	}
 
 	void showAlertAsync(final String title, final String message) {
@@ -749,11 +794,21 @@ public class MainActivity extends Activity {
 	
 	public String shareScreenshot(String path) {
 		try {
-			File file = new File(getExternalAppDir() + "/screenshots/" + path);
+			Uri uri;
+			if (android.os.Build.VERSION.SDK_INT >= 23){ // android 6.0
+				uri = CCFileProvider.getUriForFile("screenshots/" + path);
+			} else {
+				// when trying to use content:// URIs on my android 4.0.3 test device
+				//   - 1 app crashed
+				//   - 1 app wouldn't show image previews
+				// so fallback to file:// on older devices as they seem to reliably work
+				File file = new File(getGameDataDirectory() + "/screenshots/" + path);
+				uri = Uri.fromFile(file);
+			}
 			Intent intent = new Intent();
 			
 			intent.setAction(Intent.ACTION_SEND);
-			intent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(file));
+			intent.putExtra(Intent.EXTRA_STREAM, uri);
 			intent.setType("image/png");
 			intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
 			startActivity(Intent.createChooser(intent, "share via"));
@@ -763,31 +818,175 @@ public class MainActivity extends Activity {
 		return "";
 	}
 
-	// ======================================
-	// ---------------- HTTP ----------------
-	// ======================================
-	//  Implements java Android side of the Android HTTP backend (See Http.c)
-	HttpURLConnection conn;
-	InputStream src;
-	byte[] readCache = new byte[8192];
 
-	public int httpInit(String url, String method) {
+	static String uploadFolder, savePath;
+	final static int OPEN_REQUEST = 0x4F50454E;
+	final static int SAVE_REQUEST = 0x53415645;
+
+	// https://stackoverflow.com/questions/36557879/how-to-use-native-android-file-open-dialog
+	// https://developer.android.com/guide/topics/providers/document-provider
+	// https://developer.android.com/training/data-storage/shared/documents-files#java
+	// https://stackoverflow.com/questions/5657411/android-getting-a-file-uri-from-a-content-uri
+	public int openFileDialog(String folder) {
+		uploadFolder = folder;
+
+		try {
+			Intent intent = new Intent()
+					.setType("*/*")
+					.setAction(Intent.ACTION_GET_CONTENT);
+
+			startActivityForResult(Intent.createChooser(intent, "Select a file"), OPEN_REQUEST);
+		} catch (Exception ex) {
+			ex.printStackTrace();
+			return 0;// TODO log error to in-game
+		}
+		return 1;
+	}
+
+	// https://stackoverflow.com/questions/8586691/how-to-open-file-save-dialog-in-android
+	public int saveFileDialog(String path, String name) {
+		savePath = path;
+
+		try {
+			Intent intent = new Intent()
+					.setType("/")
+					.addCategory(Intent.CATEGORY_OPENABLE)
+					.setAction(Intent.ACTION_CREATE_DOCUMENT)
+					.setType("application/octet-stream")
+					.putExtra(Intent.EXTRA_TITLE, name);
+
+			startActivityForResult(Intent.createChooser(intent, "Choose destination"), SAVE_REQUEST);
+		} catch (Exception ex) {
+			ex.printStackTrace();
+			return 0;// TODO log error to in-game
+		}
+		return 1;
+	}
+
+	@Override
+	protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+		super.onActivityResult(requestCode, resultCode, data);
+		if (resultCode != RESULT_OK) return;
+
+		if (requestCode == OPEN_REQUEST) {
+			handleOpenResult(data);
+		} else if (requestCode == SAVE_REQUEST) {
+			handleSaveResult(data);
+		}
+	}
+
+	void handleSaveResult(Intent data) {
+		try {
+			Uri selected = data.getData();
+			saveTempToContent(selected, savePath);
+		} catch (Exception ex) {
+			ex.printStackTrace();
+			// TODO log error to in-game
+		}
+	}
+
+	void saveTempToContent(Uri uri, String path) throws IOException {
+		File file = new File(getGameDataDirectory() + "/" + path);
+		OutputStream output = null;
+		InputStream input   = null;
+
+		try {
+			input  = new FileInputStream(file);
+			output = getContentResolver().openOutputStream(uri);
+			copyStreamData(input, output);
+			file.delete();
+		} finally {
+			if (output != null) output.close();
+			if (input != null)  input.close();
+		}
+	}
+
+	void handleOpenResult(Intent data) {
+		try {
+			Uri selected = data.getData();
+			String name  = getContentFilename(selected);
+			String path  = saveContentToTemp(selected, uploadFolder, name);
+			pushCmd(CMD_OFD_RESULT, uploadFolder + "/" + name);
+		} catch (Exception ex) {
+			ex.printStackTrace();
+			// TODO log error to in-game
+		}
+	}
+
+	String getContentFilename(Uri uri) {
+		Cursor cursor = getContentResolver().query(uri, new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null);
+		if (cursor != null && cursor.moveToFirst()) {
+			int cIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+			if (cIndex != -1) return cursor.getString(cIndex);
+		}
+		return null;
+	}
+
+	String saveContentToTemp(Uri uri, String folder, String name) throws IOException {
+		//File file = new File(getExternalFilesDir(null), folder + "/" + name);
+		File file = new File(getGameDataDirectory() + "/" + folder + "/" + name);
+		file.getParentFile().mkdirs();
+
+		OutputStream output = null;
+		InputStream input   = null;
+
+		try {
+			output = new FileOutputStream(file);
+			input  = getContentResolver().openInputStream(uri);
+			copyStreamData(input, output);
+		} finally {
+			if (output != null) output.close();
+			if (input != null)  input.close();
+		}
+		return file.getAbsolutePath();
+	}
+
+	static void copyStreamData(InputStream input, OutputStream output) throws IOException {
+		byte[] temp = new byte[8192];
+		int length;
+		while ((length = input.read(temp)) > 0)
+			output.write(temp, 0, length);
+	}
+
+
+	// ======================================================================
+	// -------------------------------- HTTP --------------------------------
+	// ======================================================================
+	//  Implements java Android side of the Android HTTP backend (See Http.c)
+	static HttpURLConnection conn;
+	static InputStream src;
+	static byte[] readCache = new byte[8192];
+
+	public static int httpInit(String url, String method) {
 		try {
 			conn = (HttpURLConnection)new URL(url).openConnection();
 			conn.setDoInput(true);
 			conn.setRequestMethod(method);
 			conn.setInstanceFollowRedirects(true);
+			
+			httpAddMethodHeaders(method);
 			return 0;
 		} catch (Exception ex) {
 			return httpOnError(ex);
 		}
 	}
+	
+	static void httpAddMethodHeaders(String method) {
+		if (!method.equals("HEAD")) return;
 
-	public void httpSetHeader(String name, String value) {
+		// Ever since dropbox switched to to chunked transfer encoding,
+		//  sending a HEAD request to dropbox always seems to result in the
+		//  next GET request failing with 'Unexpected status line' ProtocolException
+		// Seems to be a known issue: https://github.com/square/okhttp/issues/3689
+		// Simplest workaround is to ask for connection to be closed after HEAD request
+		httpSetHeader("connection", "close");
+	}
+
+	public static void httpSetHeader(String name, String value) {
 		conn.setRequestProperty(name, value);
 	}
 
-	public int httpSetData(byte[] data) {
+	public static int httpSetData(byte[] data) {
 		try {
 			conn.setDoOutput(true);
 			conn.getOutputStream().write(data);
@@ -798,7 +997,7 @@ public class MainActivity extends Activity {
 		}
 	}
 
-	public int httpPerform() {
+	public static int httpPerform() {
 		int len;
 		try {
 			conn.connect();
@@ -830,7 +1029,7 @@ public class MainActivity extends Activity {
 		}
 	}
 
-	void httpFinish() {
+	static void httpFinish() {
 		conn = null;
 		try {
 			src.close();
@@ -839,20 +1038,20 @@ public class MainActivity extends Activity {
 	}
 
 	// TODO: Should we prune this list?
-	List<String> errors = new ArrayList<String>();
+	static List<String> errors = new ArrayList<String>();
 
-	int httpOnError(Exception ex) {
+	static int httpOnError(Exception ex) {
 		ex.printStackTrace();
 		httpFinish();
 		errors.add(ex.getMessage());
 		return -errors.size(); // don't want 0 as an error code
 	}
 
-	public String httpDescribeError(int res) {
+	public static String httpDescribeError(int res) {
 		res = -res - 1;
 		return res >= 0 && res < errors.size() ? errors.get(res) : null;
 	}
 
-	native void httpParseHeader(String header);
-	native void httpAppendData(byte[] data, int len);
+	native static void httpParseHeader(String header);
+	native static void httpAppendData(byte[] data, int len);
 }

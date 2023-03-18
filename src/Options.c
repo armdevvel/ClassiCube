@@ -10,6 +10,7 @@
 struct StringsBuffer Options;
 static struct StringsBuffer changedOpts;
 cc_result Options_LoadResult;
+static cc_bool savingPaused;
 
 void Options_Free(void) {
 	StringsBuffer_Clear(&Options);
@@ -62,10 +63,14 @@ static void SaveOptions(void) {
 }
 
 void Options_SaveIfChanged(void) {
+	savingPaused = false;
 	if (!changedOpts.count) return;
+	
 	Options_Reload();
 	SaveOptions();
 }
+
+void Options_PauseSaving(void) { savingPaused = true; }
 
 
 cc_bool Options_UNSAFE_Get(const char* keyRaw, cc_string* value) {
@@ -157,8 +162,8 @@ void Options_SetString(const cc_string* key, const cc_string* value) {
 		EntryList_Set(&Options, key, value, '=');
 	}
 
-#ifdef CC_BUILD_WEB
-	SaveOptions();
+#if defined CC_BUILD_WEB || defined CC_BUILD_ANDROID || defined CC_BUILD_IOS
+	if (!savingPaused) SaveOptions();
 #endif
 
 	if (HasChanged(key)) return;
@@ -175,6 +180,7 @@ void Options_SetSecure(const char* opt, const cc_string* src) {
 	res = Platform_Encrypt(src->buffer, src->length, &enc);
 	if (res) { Platform_Log2("Error %h encrypting option %c", &res, opt); return; }
 
+	/* base64 encode the data, as user might edit options.txt with a text editor */
 	if (enc.length > 1500) Logger_Abort("too large to base64");
 	tmp.buffer   = data;
 	tmp.length   = Convert_ToBase64(enc.buffer, enc.length, data);

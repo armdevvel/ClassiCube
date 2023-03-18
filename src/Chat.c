@@ -18,43 +18,40 @@
 #include "TexturePack.h"
 #include "Options.h"
 #include "Drawer2D.h"
+ 
+static char status[5][STRING_SIZE];
+static char bottom[3][STRING_SIZE];
+static char client[2][STRING_SIZE];
+static char announcement[STRING_SIZE];
+static char bigAnnouncement[STRING_SIZE];
+static char smallAnnouncement[STRING_SIZE];
 
-static char msgs[10][STRING_SIZE];
-cc_string Chat_Status[4]       = { String_FromArray(msgs[0]), String_FromArray(msgs[1]), String_FromArray(msgs[2]), String_FromArray(msgs[3]) };
-cc_string Chat_BottomRight[3]  = { String_FromArray(msgs[4]), String_FromArray(msgs[5]), String_FromArray(msgs[6]) };
-cc_string Chat_ClientStatus[2] = { String_FromArray(msgs[7]), String_FromArray(msgs[8]) };
+cc_string Chat_Status[5]       = { String_FromArray(status[0]), String_FromArray(status[1]), String_FromArray(status[2]),
+                                                                String_FromArray(status[3]), String_FromArray(status[4]) };
+cc_string Chat_BottomRight[3]  = { String_FromArray(bottom[0]), String_FromArray(bottom[1]), String_FromArray(bottom[2]) };
+cc_string Chat_ClientStatus[2] = { String_FromArray(client[0]), String_FromArray(client[8]) };
 
-cc_string Chat_Announcement = String_FromArray(msgs[9]);
+cc_string Chat_Announcement = String_FromArray(announcement);
+cc_string Chat_BigAnnouncement = String_FromArray(bigAnnouncement);
+cc_string Chat_SmallAnnouncement = String_FromArray(smallAnnouncement);
+
 double Chat_AnnouncementReceived;
+double Chat_BigAnnouncementReceived;
+double Chat_SmallAnnouncementReceived;
+
 struct StringsBuffer Chat_Log, Chat_InputLog;
 cc_bool Chat_Logging;
 
 /*########################################################################################################################*
 *-------------------------------------------------------Chat logging------------------------------------------------------*
 *#########################################################################################################################*/
-#define CHAT_LOGTIMES_DEF_ELEMS 256
-static double defaultLogTimes[CHAT_LOGTIMES_DEF_ELEMS];
-static int logTimesCapacity = CHAT_LOGTIMES_DEF_ELEMS, logTimesCount;
-double* Chat_LogTime = defaultLogTimes;
+double Chat_RecentLogTimes[CHATLOG_TIME_MASK + 1];
 
-static void AppendChatLogTime(void) {
-	double now = Game.Time;
-
-	if (logTimesCount == logTimesCapacity) {
-		Utils_Resize((void**)&Chat_LogTime, &logTimesCapacity,
-					sizeof(double), CHAT_LOGTIMES_DEF_ELEMS, 512);
-	}
-	Chat_LogTime[logTimesCount++] = now;
+static void ClearChatLogs(void) {
+	Mem_Set(Chat_RecentLogTimes, 0, sizeof(Chat_RecentLogTimes));
+	StringsBuffer_Clear(&Chat_Log);
 }
 
-#ifdef CC_BUILD_MINFILES
-static void ResetLogFile(void) { }
-static void CloseLogFile(void) { }
-void Chat_SetLogName(const cc_string* name) { }
-void Chat_DisableLogging(void) { }
-static void OpenChatLog(struct DateTime* now) { }
-static void AppendChatLog(const cc_string* text) { }
-#else
 static char      logNameBuffer[STRING_SIZE];
 static cc_string logName = String_FromArray(logNameBuffer);
 static char      logPathBuffer[FILENAME_SIZE];
@@ -96,7 +93,7 @@ void Chat_SetLogName(const cc_string* name) {
 		if (AllowedLogNameChar(c)) {
 			String_Append(&logName, c);
 		} else if (c == '&') {
-			i++; /* skip over following colour code */
+			i++; /* skip over following color code */
 		}
 	}
 }
@@ -162,7 +159,7 @@ static void OpenChatLog(struct DateTime* now) {
 }
 
 static void AppendChatLog(const cc_string* text) {
-	cc_string str; char strBuffer[STRING_SIZE * 2];
+	cc_string str; char strBuffer[DRAWER2D_MAX_TEXT_LENGTH];
 	struct DateTime now;
 	cc_result res;	
 
@@ -180,14 +177,13 @@ static void AppendChatLog(const cc_string* text) {
 	/* [HH:mm:ss] text */
 	String_InitArray(str, strBuffer);
 	String_Format3(&str, "[%p2:%p2:%p2] ", &now.hour, &now.minute, &now.second);
-	Drawer2D_WithoutCols(&str, text);
+	Drawer2D_WithoutColors(&str, text);
 
 	res = Stream_WriteLine(&logStream, &str);
 	if (!res) return;
 	Chat_DisableLogging();
 	Logger_SysWarn2(res, "writing to", &logPath);
 }
-#endif
 
 void Chat_Add1(const char* format, const void* a1) {
 	Chat_Add4(format, a1, NULL, NULL, NULL);
@@ -213,21 +209,44 @@ void Chat_AddRaw(const char* raw) {
 void Chat_Add(const cc_string* text) { Chat_AddOf(text, MSG_TYPE_NORMAL); }
 
 void Chat_AddOf(const cc_string* text, int msgType) {
+	cc_string str;
 	if (msgType == MSG_TYPE_NORMAL) {
-		StringsBuffer_Add(&Chat_Log, text);
-		AppendChatLogTime();
-		AppendChatLog(text);
+		/* Check for chat overflow (see issue #837) */
+		/* This happens because Offset/Length are packed into a single 32 bit value, */
+		/*  with 9 bits used for length. Hence if offset exceeds 2^23 (8388608), it */
+		/*  overflows and earlier chat messages start wrongly appearing instead */
+		if (Chat_Log.totalLength > 8388000) {
+			ClearChatLogs();
+			Chat_AddRaw("&cChat log cleared as it hit 8.3 million character limit");
+		}
+
+		/* StringsBuffer_Add will abort game if try to add string > 511 characters */
+		str        = *text; 
+		str.length = min(str.length, DRAWER2D_MAX_TEXT_LENGTH);
+
+		Chat_GetLogTime(Chat_Log.count) = Game.Time;
+		AppendChatLog(&str);
+		StringsBuffer_Add(&Chat_Log, &str);
 	} else if (msgType >= MSG_TYPE_STATUS_1 && msgType <= MSG_TYPE_STATUS_3) {
 		/* Status[0] is for texture pack downloading message */
-		String_Copy(&Chat_Status[1 + (msgType - MSG_TYPE_STATUS_1)], text);
+		/* Status[1] is for reduced performance mode message */
+		String_Copy(&Chat_Status[2 + (msgType - MSG_TYPE_STATUS_1)], text);
 	} else if (msgType >= MSG_TYPE_BOTTOMRIGHT_1 && msgType <= MSG_TYPE_BOTTOMRIGHT_3) {	
 		String_Copy(&Chat_BottomRight[msgType - MSG_TYPE_BOTTOMRIGHT_1], text);
 	} else if (msgType == MSG_TYPE_ANNOUNCEMENT) {
 		String_Copy(&Chat_Announcement, text);
 		Chat_AnnouncementReceived = Game.Time;
+	} else if (msgType == MSG_TYPE_BIGANNOUNCEMENT) {
+		String_Copy(&Chat_BigAnnouncement, text);
+		Chat_BigAnnouncementReceived = Game.Time;
+	} else if (msgType == MSG_TYPE_SMALLANNOUNCEMENT) {
+		String_Copy(&Chat_SmallAnnouncement, text);
+		Chat_SmallAnnouncementReceived = Game.Time;
 	} else if (msgType >= MSG_TYPE_CLIENTSTATUS_1 && msgType <= MSG_TYPE_CLIENTSTATUS_2) {
 		String_Copy(&Chat_ClientStatus[msgType - MSG_TYPE_CLIENTSTATUS_1], text);
-	}
+	} else if (msgType >= MSG_TYPE_EXTRASTATUS_1 && msgType <= MSG_TYPE_EXTRASTATUS_2) {
+		String_Copy(&Chat_Status[msgType - MSG_TYPE_EXTRASTATUS_1], text);
+	} 
 
 	Event_RaiseChat(&ChatEvents.ChatReceived, text, msgType);
 }
@@ -314,6 +333,7 @@ static void Commands_Execute(const cc_string* input) {
 
 	struct ChatCommand* cmd;
 	int offset, count;
+	cc_string name, value;
 	cc_string args[50];
 
 	if (String_CaselessStarts(&text, &prefixSpace)) { /* /client command args */
@@ -328,15 +348,22 @@ static void Commands_Execute(const cc_string* input) {
 	/* Check for only / or /client */
 	if (!text.length) { Commands_PrintDefault(); return; }
 
-	count = String_UNSAFE_Split(&text, ' ', args, Array_Elems(args));
-	cmd   = Commands_FindMatch(&args[0]);
+	String_UNSAFE_Separate(&text, ' ', &name, &value);
+	cmd = Commands_FindMatch(&name);
 	if (!cmd) return;
 
-	if (cmd->singleplayerOnly && !Server.IsSinglePlayer) {
-		Chat_Add1("&e/client: \"&f%s&e\" can only be used in singleplayer.", &args[0]);
+	if ((cmd->flags & COMMAND_FLAG_SINGLEPLAYER_ONLY) && !Server.IsSinglePlayer) {
+		Chat_Add1("&e/client: \"&f%s&e\" can only be used in singleplayer.", &name);
 		return;
 	}
-	cmd->Execute(&args[1], count - 1);
+
+	if (cmd->flags & COMMAND_FLAG_UNSPLIT_ARGS) {
+		/* argsCount = 0 if value.length is 0, 1 otherwise */
+		cmd->Execute(&value, value.length != 0);
+	} else {
+		count = String_UNSAFE_Split(&value, ' ', args, Array_Elems(args));
+		cmd->Execute(args,   value.length ? count : 0);
+	}
 }
 
 
@@ -348,7 +375,7 @@ static void HelpCommand_Execute(const cc_string* args, int argsCount) {
 	int i;
 
 	if (!argsCount) { Commands_PrintDefault(); return; }
-	cmd = Commands_FindMatch(&args[0]);
+	cmd = Commands_FindMatch(args);
 	if (!cmd) return;
 
 	for (i = 0; i < Array_Elems(cmd->help); i++) {
@@ -358,7 +385,8 @@ static void HelpCommand_Execute(const cc_string* args, int argsCount) {
 }
 
 static struct ChatCommand HelpCommand = {
-	"Help", HelpCommand_Execute, false,
+	"Help", HelpCommand_Execute,
+	COMMAND_FLAG_UNSPLIT_ARGS,
 	{
 		"&a/client help [command name]",
 		"&eDisplays the help for the given command.",
@@ -378,7 +406,8 @@ static void GpuInfoCommand_Execute(const cc_string* args, int argsCount) {
 }
 
 static struct ChatCommand GpuInfoCommand = {
-	"GpuInfo", GpuInfoCommand_Execute, false,
+	"GpuInfo", GpuInfoCommand_Execute,
+	COMMAND_FLAG_UNSPLIT_ARGS,
 	{
 		"&a/client gpuinfo",
 		"&eDisplays information about your GPU.",
@@ -391,24 +420,25 @@ static void RenderTypeCommand_Execute(const cc_string* args, int argsCount) {
 		Chat_AddRaw("&e/client: &cYou didn't specify a new render type."); return;
 	}
 
-	flags = EnvRenderer_CalcFlags(&args[0]);
+	flags = EnvRenderer_CalcFlags(args);
 	if (flags >= 0) {
 		EnvRenderer_SetMode(flags);
-		Options_Set(OPT_RENDER_TYPE, &args[0]);
-		Chat_Add1("&e/client: &fRender type is now %s.", &args[0]);
+		Options_Set(OPT_RENDER_TYPE, args);
+		Chat_Add1("&e/client: &fRender type is now %s.", args);
 	} else {
-		Chat_Add1("&e/client: &cUnrecognised render type &f\"%s\"&c.", &args[0]);
+		Chat_Add1("&e/client: &cUnrecognised render type &f\"%s\"&c.", args);
 	}
 }
 
 static struct ChatCommand RenderTypeCommand = {
-	"RenderType", RenderTypeCommand_Execute, false,
+	"RenderType", RenderTypeCommand_Execute,
+	COMMAND_FLAG_UNSPLIT_ARGS,
 	{
-		"&a/client rendertype [normal/legacy/legacyfast]",
-		"&bnormal: &eDefault renderer, with all environmental effects enabled.",
-		"&blegacy: &eMay be slightly slower than normal, but produces the same environmental effects.",
-		"&blegacyfast: &eSacrifices clouds, fog and overhead sky for faster performance.",
-		"&bnormalfast: &eSacrifices clouds, fog and overhead sky for faster performance.",
+		"&a/client rendertype [normal/legacy/fast]",
+		"&bnormal: &eDefault render mode, with all environmental effects enabled",
+		"&blegacy: &eSame as normal mode, &cbut is usually slightly slower",
+		"   &eIf you have issues with clouds and map edges disappearing randomly, use this mode",
+		"&bfast: &eSacrifices clouds, fog and overhead sky for faster performance",
 	}
 };
 
@@ -430,7 +460,8 @@ static void ResolutionCommand_Execute(const cc_string* args, int argsCount) {
 }
 
 static struct ChatCommand ResolutionCommand = {
-	"Resolution", ResolutionCommand_Execute, false,
+	"Resolution", ResolutionCommand_Execute,
+	0,
 	{
 		"&a/client resolution [width] [height]",
 		"&ePrecisely sets the size of the rendered window.",
@@ -439,14 +470,15 @@ static struct ChatCommand ResolutionCommand = {
 
 static void ModelCommand_Execute(const cc_string* args, int argsCount) {
 	if (argsCount) {
-		Entity_SetModel(&LocalPlayer_Instance.Base, &args[0]);
+		Entity_SetModel(&LocalPlayer_Instance.Base, args);
 	} else {
 		Chat_AddRaw("&e/client model: &cYou didn't specify a model name.");
 	}
 }
 
 static struct ChatCommand ModelCommand = {
-	"Model", ModelCommand_Execute, true,
+	"Model", ModelCommand_Execute,
+	COMMAND_FLAG_SINGLEPLAYER_ONLY | COMMAND_FLAG_UNSPLIT_ARGS,
 	{
 		"&a/client model [name]",
 		"&bnames: &echibi, chicken, creeper, human, pig, sheep",
@@ -460,7 +492,8 @@ static void ClearDeniedCommand_Execute(const cc_string* args, int argsCount) {
 }
 
 static struct ChatCommand ClearDeniedCommand = {
-	"ClearDenied", ClearDeniedCommand_Execute, false,
+	"ClearDenied", ClearDeniedCommand_Execute,
+	COMMAND_FLAG_UNSPLIT_ARGS,
 	{
 		"&a/client cleardenied",
 		"&eClears the list of texture pack URLs you have denied",
@@ -475,24 +508,7 @@ static int cuboid_block = -1;
 static IVec3 cuboid_mark1, cuboid_mark2;
 static cc_bool cuboid_persist, cuboid_hooked, cuboid_hasMark1;
 static const cc_string cuboid_msg = String_FromConst("&eCuboid: &fPlace or delete a block.");
-
-static cc_bool CuboidCommand_ParseBlock(const cc_string* args, int argsCount) {
-	int block;
-	if (!argsCount) return true;
-	if (String_CaselessEqualsConst(&args[0], "yes")) { cuboid_persist = true; return true; }
-
-	block = Block_Parse(&args[0]);
-	if (block == -1) {
-		Chat_Add1("&eCuboid: &c\"%s\" is not a valid block name or id.", &args[0]); return false;
-	}
-
-	if (block >= BLOCK_CPE_COUNT && !Block_IsCustomDefined(block)) {
-		Chat_Add1("&eCuboid: &cThere is no block with id \"%s\".", &args[0]); return false;
-	}
-
-	cuboid_block = block;
-	return true;
-}
+static const cc_string yes_string = String_FromConst("yes");
 
 static void CuboidCommand_DoCuboid(void) {
 	IVec3 min, max;
@@ -542,6 +558,33 @@ static void CuboidCommand_BlockChanged(void* obj, IVec3 coords, BlockID old, Blo
 	}
 }
 
+static cc_bool CuboidCommand_ParseArgs(const cc_string* args) {
+	cc_string value = *args;
+	int block;
+
+	/* Check for /cuboid [block] yes */
+	if (String_CaselessEnds(&value, &yes_string)) {
+		cuboid_persist = true; 
+		value.length  -= 3;
+		String_UNSAFE_TrimEnd(&value);
+
+		/* special case "/cuboid yes" */
+		if (!value.length) return true;
+	}
+
+	block = Block_Parse(&value);
+	if (block == -1) {
+		Chat_Add1("&eCuboid: &c\"%s\" is not a valid block name or id.", &value); return false;
+	}
+
+	if (block > Game_Version.MaxBlock && !Block_IsCustomDefined(block)) {
+		Chat_Add1("&eCuboid: &cThere is no block with id \"%s\".", &value); return false;
+	}
+
+	cuboid_block = block;
+	return true;
+}
+
 static void CuboidCommand_Execute(const cc_string* args, int argsCount) {
 	if (cuboid_hooked) {
 		Event_Unregister_(&UserEvents.BlockChanged, NULL, CuboidCommand_BlockChanged);
@@ -551,11 +594,7 @@ static void CuboidCommand_Execute(const cc_string* args, int argsCount) {
 	cuboid_block    = -1;
 	cuboid_hasMark1 = false;
 	cuboid_persist  = false;
-
-	if (!CuboidCommand_ParseBlock(args, argsCount)) return;
-	if (argsCount > 1 && String_CaselessEqualsConst(&args[0], "yes")) {
-		cuboid_persist = true;
-	}
+	if (argsCount && !CuboidCommand_ParseArgs(args)) return;
 
 	Chat_AddOf(&cuboid_msg, MSG_TYPE_CLIENTSTATUS_1);
 	Event_Register_(&UserEvents.BlockChanged, NULL, CuboidCommand_BlockChanged);
@@ -563,7 +602,8 @@ static void CuboidCommand_Execute(const cc_string* args, int argsCount) {
 }
 
 static struct ChatCommand CuboidCommand = {
-	"Cuboid", CuboidCommand_Execute, true, 
+	"Cuboid", CuboidCommand_Execute,
+	COMMAND_FLAG_SINGLEPLAYER_ONLY | COMMAND_FLAG_UNSPLIT_ARGS,
 	{
 		"&a/client cuboid [block] [persist]",
 		"&eFills the 3D rectangle between two points with [block].",
@@ -578,8 +618,8 @@ static struct ChatCommand CuboidCommand = {
 *------------------------------------------------------TeleportCommand----------------------------------------------------*
 *#########################################################################################################################*/
 static void TeleportCommand_Execute(const cc_string* args, int argsCount) {
-	struct LocationUpdate update;
 	struct Entity* e = &LocalPlayer_Instance.Base;
+	struct LocationUpdate update;
 	Vec3 v;
 
 	if (argsCount != 3) {
@@ -591,12 +631,14 @@ static void TeleportCommand_Execute(const cc_string* args, int argsCount) {
 		return;
 	}
 
-	LocationUpdate_MakePos(&update, v, false);
-	e->VTABLE->SetLocation(e, &update, false);
+	update.flags = LU_HAS_POS;
+	update.pos   = v;
+	e->VTABLE->SetLocation(e, &update);
 }
 
 static struct ChatCommand TeleportCommand = {
-	"TP", TeleportCommand_Execute, true,
+	"TP", TeleportCommand_Execute,
+	COMMAND_FLAG_SINGLEPLAYER_ONLY,
 	{
 		"&a/client tp [x y z]",
 		"&eMoves you to the given coordinates.",
@@ -607,10 +649,21 @@ static struct ChatCommand TeleportCommand = {
 /*########################################################################################################################*
 *-------------------------------------------------------Generic chat------------------------------------------------------*
 *#########################################################################################################################*/
+static void LogInputUsage(const cc_string* text) {
+	/* Simplify navigating through input history by not logging duplicate entries */
+	if (Chat_InputLog.count) {
+		int lastIndex  = Chat_InputLog.count - 1;
+		cc_string last = StringsBuffer_UNSAFE_Get(&Chat_InputLog, lastIndex);
+
+		if (String_Equals(text, &last)) return;
+	}
+	StringsBuffer_Add(&Chat_InputLog, text);
+}
+
 void Chat_Send(const cc_string* text, cc_bool logUsage) {
 	if (!text->length) return;
 	Event_RaiseChat(&ChatEvents.ChatSending, text, 0);
-	if (logUsage) StringsBuffer_Add(&Chat_InputLog, text);
+	if (logUsage) LogInputUsage(text);
 
 	if (Commands_IsCommandPrefix(text)) {
 		Commands_Execute(text);
@@ -629,9 +682,8 @@ static void OnInit(void) {
 	Commands_Register(&TeleportCommand);
 	Commands_Register(&ClearDeniedCommand);
 
-#if defined CC_BUILD_MINFILES 
-#elif defined CC_BUILD_ANDROID
-	/* Better to not log chat by default on android, */
+#if defined CC_BUILD_MOBILE || defined CC_BUILD_WEB
+	/* Better to not log chat by default on mobile/web, */
 	/* since it's not easily visible to end users */
 	Chat_Logging = Options_GetBool(OPT_CHAT_LOGGING, false);
 #else
@@ -641,6 +693,8 @@ static void OnInit(void) {
 
 static void ClearCPEMessages(void) {
 	Chat_AddOf(&String_Empty, MSG_TYPE_ANNOUNCEMENT);
+	Chat_AddOf(&String_Empty, MSG_TYPE_BIGANNOUNCEMENT);
+	Chat_AddOf(&String_Empty, MSG_TYPE_SMALLANNOUNCEMENT);
 	Chat_AddOf(&String_Empty, MSG_TYPE_STATUS_1);
 	Chat_AddOf(&String_Empty, MSG_TYPE_STATUS_2);
 	Chat_AddOf(&String_Empty, MSG_TYPE_STATUS_3);
@@ -660,11 +714,7 @@ static void OnFree(void) {
 	ClearCPEMessages();
 	cmds_head = NULL;
 
-	if (Chat_LogTime != defaultLogTimes) Mem_Free(Chat_LogTime);
-	Chat_LogTime  = defaultLogTimes;
-	logTimesCount = 0;
-
-	StringsBuffer_Clear(&Chat_Log);
+	ClearChatLogs();
 	StringsBuffer_Clear(&Chat_InputLog);
 }
 

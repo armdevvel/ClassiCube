@@ -12,6 +12,7 @@
 #include "Window.h"
 
 struct _WorldData World;
+static char nameBuffer[STRING_SIZE];
 /*########################################################################################################################*
 *----------------------------------------------------------World----------------------------------------------------------*
 *#########################################################################################################################*/
@@ -44,10 +45,12 @@ void World_Reset(void) {
 #endif
 	Mem_Free(World.Blocks);
 	World.Blocks = NULL;
+	String_InitArray(World.Name, nameBuffer);
 
 	World_SetDimensions(0, 0, 0);
 	World.Loaded   = false;
 	World.LastSave = -200;
+	World.Seed     = 0;
 	Env_Reset();
 }
 
@@ -61,7 +64,8 @@ void World_SetNewMap(BlockRaw* blocks, int width, int height, int length) {
 	if (!blocks) { width = 0; height = 0; length = 0; }
 
 	World_SetDimensions(width, height, length);
-	World.Blocks = blocks;
+	World.Blocks      = blocks;
+	World.Name.length = 0;
 
 	if (!World.Volume) World.Blocks = NULL;
 #ifdef EXTENDED_BLOCKS
@@ -88,6 +92,12 @@ CC_NOINLINE void World_SetDimensions(int width, int height, int length) {
 	World.MaxX = width  - 1;
 	World.MaxY = height - 1;
 	World.MaxZ = length - 1;
+
+	World.ChunksX = (width  + CHUNK_MAX) >> CHUNK_SHIFT;
+	World.ChunksY = (height + CHUNK_MAX) >> CHUNK_SHIFT;
+	World.ChunksZ = (length + CHUNK_MAX) >> CHUNK_SHIFT;
+
+	World.ChunksCount = World.ChunksX * World.ChunksY * World.ChunksZ;
 }
 
 #ifdef EXTENDED_BLOCKS
@@ -165,18 +175,18 @@ void Env_Reset(void) {
 	Env.SkyboxHorSpeed = 0.0f;
 	Env.SkyboxVerSpeed = 0.0f;
 
-	Env.ShadowCol = ENV_DEFAULT_SHADOW_COL;
+	Env.ShadowCol = ENV_DEFAULT_SHADOW_COLOR;
 	PackedCol_GetShaded(Env.ShadowCol, &Env.ShadowXSide,
 		&Env.ShadowZSide, &Env.ShadowYMin);
 
-	Env.SunCol = ENV_DEFAULT_SUN_COL;
+	Env.SunCol = ENV_DEFAULT_SUN_COLOR;
 	PackedCol_GetShaded(Env.SunCol, &Env.SunXSide,
 		&Env.SunZSide, &Env.SunYMin);
 
-	Env.SkyCol    = ENV_DEFAULT_SKY_COL;
-	Env.FogCol    = ENV_DEFAULT_FOG_COL;
-	Env.CloudsCol = ENV_DEFAULT_CLOUDS_COL;
-	Env.SkyboxCol = ENV_DEFAULT_SKYBOX_COL;
+	Env.SkyCol    = ENV_DEFAULT_SKY_COLOR;
+	Env.FogCol    = ENV_DEFAULT_FOG_COLOR;
+	Env.CloudsCol = ENV_DEFAULT_CLOUDS_COLOR;
+	Env.SkyboxCol = ENV_DEFAULT_SKYBOX_COLOR;
 	Env.Weather   = WEATHER_SUNNY;
 	Env.ExpFog    = false;
 }
@@ -225,26 +235,26 @@ void Env_SetSkyboxVerSpeed(float speed) {
 	Env_Set(speed, Env.SkyboxVerSpeed, ENV_VAR_SKYBOX_VER_SPEED);
 }
 
-void Env_SetSkyCol(PackedCol col) {
-	Env_Set(col, Env.SkyCol, ENV_VAR_SKY_COL);
+void Env_SetSkyCol(PackedCol color) {
+	Env_Set(color, Env.SkyCol, ENV_VAR_SKY_COLOR);
 }
-void Env_SetFogCol(PackedCol col) {
-	Env_Set(col, Env.FogCol, ENV_VAR_FOG_COL);
+void Env_SetFogCol(PackedCol color) {
+	Env_Set(color, Env.FogCol, ENV_VAR_FOG_COLOR);
 }
-void Env_SetCloudsCol(PackedCol col) {
-	Env_Set(col, Env.CloudsCol, ENV_VAR_CLOUDS_COL);
+void Env_SetCloudsCol(PackedCol color) {
+	Env_Set(color, Env.CloudsCol, ENV_VAR_CLOUDS_COLOR);
 }
-void Env_SetSkyboxCol(PackedCol col) {
-	Env_Set(col, Env.SkyboxCol, ENV_VAR_SKYBOX_COL);
+void Env_SetSkyboxCol(PackedCol color) {
+	Env_Set(color, Env.SkyboxCol, ENV_VAR_SKYBOX_COLOR);
 }
 
-void Env_SetSunCol(PackedCol col) {
-	PackedCol_GetShaded(col, &Env.SunXSide, &Env.SunZSide, &Env.SunYMin);
-	Env_Set(col, Env.SunCol, ENV_VAR_SUN_COL);
+void Env_SetSunCol(PackedCol color) {
+	PackedCol_GetShaded(color, &Env.SunXSide, &Env.SunZSide, &Env.SunYMin);
+	Env_Set(color, Env.SunCol, ENV_VAR_SUN_COLOR);
 }
-void Env_SetShadowCol(PackedCol col) {
-	PackedCol_GetShaded(col, &Env.ShadowXSide, &Env.ShadowZSide, &Env.ShadowYMin);
-	Env_Set(col, Env.ShadowCol, ENV_VAR_SHADOW_COL);
+void Env_SetShadowCol(PackedCol color) {
+	PackedCol_GetShaded(color, &Env.ShadowXSide, &Env.ShadowZSide, &Env.ShadowYMin);
+	Env_Set(color, Env.ShadowCol, ENV_VAR_SHADOW_COLOR);
 }
 
 

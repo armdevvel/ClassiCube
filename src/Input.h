@@ -1,9 +1,9 @@
 #ifndef CC_INPUT_H
 #define CC_INPUT_H
 #include "Core.h"
-/* Manages keyboard, mouse, and touch state.
-   Raises events when keys are pressed etc, and implements base handlers for them.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+/* 
+Manages input state, raising input related events, and base input handling
+Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 struct IGameComponent;
 struct StringsBuffer;
@@ -50,15 +50,20 @@ enum InputButtons {
 	INPUT_CLIPBOARD_PASTE = 1002
 };
 
-/* Simple names for each input button. */
-extern const char* const Input_Names[INPUT_COUNT];
+/* Names for each input button when stored to disc */
+extern const char* const Input_StorageNames[INPUT_COUNT];
+/* Simple display names for each input button */
+extern const char* const Input_DisplayNames[INPUT_COUNT];
 
 #define Key_IsWinPressed()   (Input_Pressed[KEY_LWIN]   || Input_Pressed[KEY_RWIN])
 #define Key_IsAltPressed()   (Input_Pressed[KEY_LALT]   || Input_Pressed[KEY_RALT])
 #define Key_IsCtrlPressed()  (Input_Pressed[KEY_LCTRL]  || Input_Pressed[KEY_RCTRL])
 #define Key_IsShiftPressed() (Input_Pressed[KEY_LSHIFT] || Input_Pressed[KEY_RSHIFT])
 
-#ifdef CC_BUILD_DARWIN
+#if defined CC_BUILD_HAIKU
+/* Haiku uses ALT instead of CTRL for clipboard and stuff */
+#define Key_IsActionPressed() Key_IsAltPressed()
+#elif defined CC_BUILD_DARWIN
 /* macOS uses CMD instead of CTRL for clipboard and stuff */
 #define Key_IsActionPressed() Key_IsWinPressed()
 #else
@@ -82,8 +87,10 @@ extern cc_bool Input_RawMode;
 
 #ifdef CC_BUILD_TOUCH
 #define INPUT_MAX_POINTERS 32
+enum INPUT_MODE { INPUT_MODE_PLACE, INPUT_MODE_DELETE, INPUT_MODE_NONE, INPUT_MODE_COUNT };
+
 extern int Pointers_Count;
-extern cc_bool Input_TapPlace, Input_HoldPlace;
+extern int Input_TapMode, Input_HoldMode;
 /* Whether touch input is being used. */
 extern cc_bool Input_TouchMode;
 void Input_SetTouchMode(cc_bool enabled);
@@ -139,12 +146,17 @@ CC_API cc_bool KeyBind_IsPressed(KeyBind binding);
 /* Set the key that the given key binding is bound to. (also updates options list) */
 void KeyBind_Set(KeyBind binding, int key);
 
+/* whether to leave text input open for user to enter further input */
+#define HOTKEY_FLAG_STAYS_OPEN   0x01
+/* Whether the hotkey was auto defined (e.g. by server) */
+#define HOTKEY_FLAG_AUTO_DEFINED 0x02
+
 extern const cc_uint8 Hotkeys_LWJGL[256];
 struct HotkeyData {
-	int TextIndex;     /* contents to copy directly into the input bar */
-	cc_uint8 Trigger;  /* Member of Key enumeration */
-	cc_uint8 Flags;    /* HotkeyModifiers bitflags */
-	cc_bool StaysOpen; /* whether the user is able to enter further input */
+	int textIndex;     /* contents to copy directly into the input bar */
+	cc_uint8 trigger;  /* Member of Key enumeration */
+	cc_uint8 mods;     /* HotkeyModifiers bitflags */
+	cc_uint8 flags;    /* HOTKEY_FLAG flags */
 };
 
 #define HOTKEYS_MAX_COUNT 256
@@ -155,7 +167,7 @@ enum HotkeyModifiers {
 };
 
 /* Adds or updates a new hotkey. */
-void Hotkeys_Add(int trigger, cc_uint8 modifiers, const cc_string* text, cc_bool more);
+void Hotkeys_Add(int trigger, cc_uint8 modifiers, const cc_string* text, cc_uint8 flags);
 /* Removes the given hotkey. */
 cc_bool Hotkeys_Remove(int trigger, cc_uint8 modifiers);
 /* Returns the first hotkey which is bound to the given key and has its modifiers pressed. */

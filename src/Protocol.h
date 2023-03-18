@@ -1,8 +1,9 @@
 #ifndef CC_PROTOCOL_H
 #define CC_PROTOCOL_H
 #include "Vectors.h"
-/* Implements network protocols for original classic, CPE, and WoM textures.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+/* 
+Implements network protocols for original classic, CPE, and WoM textures
+Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 struct RayTracer;
 
@@ -35,8 +36,14 @@ enum OPCODE_ {
 	OPCODE_SET_SPAWNPOINT,      OPCODE_VELOCITY_CONTROL,
 	OPCODE_DEFINE_EFFECT,       OPCODE_SPAWN_EFFECT,
 	OPCODE_DEFINE_MODEL, OPCODE_DEFINE_MODEL_PART, OPCODE_UNDEFINE_MODEL,
+	OPCODE_PLUGIN_MESSAGE, OPCODE_ENTITY_TELEPORT_EXT,
 
 	OPCODE_COUNT
+};
+
+enum PROTOCOL_VERSION_ {
+	PROTOCOL_0017 = 4, PROTOCOL_0019 = 5,
+	PROTOCOL_0020 = 6, PROTOCOL_0030 = 7,
 };
 
 
@@ -58,9 +65,11 @@ void Protocol_RemoveEntity(EntityID id);
 void Protocol_Tick(void);
 
 extern cc_bool cpe_needD3Fix;
-void Classic_SendChat(const cc_string* text, cc_bool partial);
-void Classic_WritePosition(Vec3 pos, float yaw, float pitch);
-void Classic_WriteSetBlock(int x, int y, int z, cc_bool place, BlockID block);
+void Classic_SendChat(const cc_string* text, cc_bool partial);\
+void Classic_SendSetBlock(int x, int y, int z, cc_bool place, BlockID block);
 void Classic_SendLogin(void);
 void CPE_SendPlayerClick(int button, cc_bool pressed, cc_uint8 targetId, struct RayTracer* t);
+
+/* Send a PluginMessage to the server; data must contain 64 bytes. */
+CC_API void CPE_SendPluginMessage(cc_uint8 channel, cc_uint8* data);
 #endif

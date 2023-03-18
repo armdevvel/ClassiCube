@@ -1,22 +1,24 @@
 #include "Event.h"
 #include "Logger.h"
 
-struct _EntityEventsList  EntityEvents;
-struct _TabListEventsList TabListEvents;
-struct _TextureEventsList TextureEvents;
-struct _GfxEventsList     GfxEvents;
-struct _UserEventsList    UserEvents;
-struct _BlockEventsList   BlockEvents;
-struct _WorldEventsList   WorldEvents;
-struct _ChatEventsList    ChatEvents;
-struct _WindowEventsList  WindowEvents;
-struct _InputEventsList   InputEvents;
-struct _PointerEventsList PointerEvents;
-struct _NetEventsList     NetEvents;
+int EventAPIVersion = 3;
+struct _EntityEventsList        EntityEvents;
+struct _TabListEventsList       TabListEvents;
+struct _TextureEventsList       TextureEvents;
+struct _GfxEventsList           GfxEvents;
+struct _UserEventsList          UserEvents;
+struct _BlockEventsList         BlockEvents;
+struct _WorldEventsList         WorldEvents;
+struct _ChatEventsList          ChatEvents;
+struct _WindowEventsList        WindowEvents;
+struct _InputEventsList         InputEvents;
+struct _PointerEventsList       PointerEvents;
+struct _NetEventsList           NetEvents;
 
 void Event_Register(struct Event_Void* handlers, void* obj, Event_Void_Callback handler) {
 	int i;
 	for (i = 0; i < handlers->Count; i++) {
+		/* Attempting to register the same handler twice is usually caused by a bug */
 		if (handlers->Handlers[i] == handler && handlers->Objs[i] == obj) {
 			Logger_Abort("Attempt to register event handler that was already registered");
 		}
@@ -50,7 +52,7 @@ void Event_Unregister(struct Event_Void* handlers, void* obj, Event_Void_Callbac
 }
 
 void Event_UnregisterAll(void) {
-	/* NOTE: This must be kept in sync with Event.h list of events */
+	/* NOTE: This MUST be kept in sync with Event.h list of events */
 	EntityEvents.Added.Count   = 0;
 	EntityEvents.Removed.Count = 0;
 
@@ -85,12 +87,14 @@ void Event_UnregisterAll(void) {
 	ChatEvents.ChatSending.Count    = 0;
 	ChatEvents.ColCodeChanged.Count = 0;
 
-	WindowEvents.Redraw.Count  = 0;
+	WindowEvents.RedrawNeeded.Count = 0;
 	WindowEvents.Resized.Count = 0;
 	WindowEvents.Closing.Count = 0;
 	WindowEvents.FocusChanged.Count = 0;
 	WindowEvents.StateChanged.Count = 0;
-	WindowEvents.Created.Count = 0;
+	WindowEvents.Created.Count      = 0;
+	WindowEvents.InactiveChanged.Count = 0;
+	WindowEvents.Redrawing.Count    = 0;
 
 	InputEvents.Press.Count = 0;
 	InputEvents.Down.Count  = 0;
@@ -105,6 +109,7 @@ void Event_UnregisterAll(void) {
 
 	NetEvents.Connected.Count    = 0;
 	NetEvents.Disconnected.Count = 0;
+	NetEvents.PluginMessageReceived.Count = 0;
 }
 
 void Event_RaiseVoid(struct Event_Void* handlers) {
@@ -167,5 +172,12 @@ void Event_RaiseRawMove(struct Event_RawMove* handlers, float xDelta, float yDel
 	int i;
 	for (i = 0; i < handlers->Count; i++) {
 		handlers->Handlers[i](handlers->Objs[i], xDelta, yDelta);
+	}
+}
+
+void Event_RaisePluginMessage(struct Event_PluginMessage* handlers, cc_uint8 channel, cc_uint8* data) {
+	int i;
+	for (i = 0; i < handlers->Count; i++) {
+		handlers->Handlers[i](handlers->Objs[i], channel, data);
 	}
 }

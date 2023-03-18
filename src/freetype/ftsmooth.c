@@ -30,61 +30,7 @@
   static FT_Error
   ft_smooth_init( FT_Renderer  render )
   {
-    render->clazz->raster_class->raster_reset( render->raster, NULL, 0 );
-
     return 0;
-  }
-
-
-  /* sets render-specific mode */
-  static FT_Error
-  ft_smooth_set_mode( FT_Renderer  render,
-                      FT_ULong     mode_tag,
-                      FT_Pointer   data )
-  {
-    /* we simply pass it to the raster */
-    return render->clazz->raster_class->raster_set_mode( render->raster,
-                                                         mode_tag,
-                                                         data );
-  }
-
-  /* transform a given glyph image */
-  static FT_Error
-  ft_smooth_transform( FT_Renderer       render,
-                       FT_GlyphSlot      slot,
-                       const FT_Matrix*  matrix,
-                       const FT_Vector*  delta )
-  {
-    FT_Error  error = FT_Err_Ok;
-
-
-    if ( slot->format != render->glyph_format )
-    {
-      error = FT_THROW( Invalid_Argument );
-      goto Exit;
-    }
-
-    if ( matrix )
-      FT_Outline_Transform( &slot->outline, matrix );
-
-    if ( delta )
-      FT_Outline_Translate( &slot->outline, delta->x, delta->y );
-
-  Exit:
-    return error;
-  }
-
-
-  /* return the glyph's control box */
-  static void
-  ft_smooth_get_cbox( FT_Renderer   render,
-                      FT_GlyphSlot  slot,
-                      FT_BBox*      cbox )
-  {
-    FT_ZERO( cbox );
-
-    if ( slot->format == render->glyph_format )
-      FT_Outline_Get_CBox( &slot->outline, cbox );
   }
 
 
@@ -107,7 +53,7 @@
 
 
     /* check glyph image format */
-    if ( slot->format != render->glyph_format )
+    if ( slot->format != FT_GLYPH_FORMAT_OUTLINE )
     {
       error = FT_THROW( Invalid_Argument );
       goto Exit;
@@ -155,7 +101,7 @@
     params.flags  = FT_RASTER_FLAG_AA;
 
     /* grayscale */
-    error = render->raster_render( render->raster, &params );
+    error = render->raster_render( &params );
 
   Exit:
     if ( !error )
@@ -207,12 +153,7 @@
       (FT_Module_Destructor) NULL,            /* module_done   */
       (FT_Module_Requester)  NULL,            /* get_interface */
 
-    FT_GLYPH_FORMAT_OUTLINE,
-
     (FT_Renderer_RenderFunc)   ft_smooth_render,     /* render_glyph    */
-    (FT_Renderer_TransformFunc)ft_smooth_transform,  /* transform_glyph */
-    (FT_Renderer_GetCBoxFunc)  ft_smooth_get_cbox,   /* get_glyph_cbox  */
-    (FT_Renderer_SetModeFunc)  ft_smooth_set_mode,   /* set_mode        */
 
     (FT_Raster_Funcs*)&ft_grays_raster           /* raster_class    */
   )

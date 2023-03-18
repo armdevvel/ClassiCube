@@ -30,47 +30,27 @@
 #include "Input.h"
 #include "Utils.h"
 
-#define QUOTE(x) #x
-#define STRINGIFY(val) QUOTE(val)
 struct _ProtocolData Protocol;
 
 /* Classic state */
-static cc_uint8 classic_tabList[ENTITIES_MAX_COUNT >> 3];
 static cc_bool classic_receivedFirstPos;
 
 /* Map state */
 static cc_bool map_begunLoading;
 static cc_uint64 map_receiveBeg;
 static struct Stream map_part;
-static struct GZipHeader map_gzHeader;
-static int map_sizeIndex, map_volume;
-static cc_uint8 map_size[4];
-
-struct MapState {
-	struct InflateState inflateState;
-	struct Stream stream;
-	BlockRaw* blocks;
-	int index;
-	cc_bool allocFailed;
-};
-static struct MapState map;
-#ifdef EXTENDED_BLOCKS
-static struct MapState map2;
-#endif
+static int map_volume;
 
 /* CPE state */
 cc_bool cpe_needD3Fix;
 static int cpe_serverExtensionsCount, cpe_pingTicks;
 static int cpe_envMapVer = 2, cpe_blockDefsExtVer = 2, cpe_customModelsVer = 2;
 static cc_bool cpe_sendHeldBlock, cpe_useMessageTypes, cpe_extEntityPos, cpe_blockPerms, cpe_fastMap;
-static cc_bool cpe_twoWayPing, cpe_extTextures, cpe_extBlocks;
+static cc_bool cpe_twoWayPing, cpe_pluginMessages, cpe_extTextures, cpe_extBlocks;
 
 /*########################################################################################################################*
 *-----------------------------------------------------Common handlers-----------------------------------------------------*
 *#########################################################################################################################*/
-#define Classic_TabList_Get(id)   (classic_tabList[id >> 3] & (1 << (id & 0x7)))
-#define Classic_TabList_Set(id)   (classic_tabList[id >> 3] |=  (cc_uint8)(1 << (id & 0x7)))
-#define Classic_TabList_Reset(id) (classic_tabList[id >> 3] &= (cc_uint8)~(1 << (id & 0x7)))
 
 #ifndef EXTENDED_BLOCKS
 #define ReadBlock(data, value) value = *data++;
@@ -123,7 +103,7 @@ static void WriteString(cc_uint8* data, const cc_string* value) {
 	int i, count = min(value->length, STRING_SIZE);
 	for (i = 0; i < count; i++) {
 		char c = value->buffer[i];
-		if (c == '&') c = '%'; /* escape colour codes */
+		if (c == '&') c = '%'; /* escape color codes */
 		data[i] = c;
 	}
 
@@ -135,14 +115,6 @@ static void RemoveEndPlus(cc_string* value) {
 	/* from minecraft.net accounts. Unfortunately they also send this ending + to the client. */
 	if (!value->length || value->buffer[value->length - 1] != '+') return;
 	value->length--;
-}
-
-static void AddTablistEntry(EntityID id, const cc_string* playerName, const cc_string* listName, const cc_string* groupName, cc_uint8 groupRank) {
-	cc_string rawName; char rawBuffer[STRING_SIZE];
-	String_InitArray(rawName, rawBuffer);
-
-	String_AppendColorless(&rawName, playerName);
-	TabList_Set(id, &rawName, listName, groupName, groupRank);
 }
 
 static void CheckName(EntityID id, cc_string* name, cc_string* skin) {
@@ -160,7 +132,7 @@ static void CheckName(EntityID id, cc_string* name, cc_string* skin) {
 	RemoveEndPlus(skin);
 }
 
-static void Classic_ReadAbsoluteLocation(cc_uint8* data, EntityID id, cc_bool interpolate);
+static void Classic_ReadAbsoluteLocation(cc_uint8* data, EntityID id, cc_uint8 flags);
 static void AddEntity(cc_uint8* data, EntityID id, const cc_string* name, const cc_string* skin, cc_bool readPosition) {
 	struct LocalPlayer* p = &LocalPlayer_Instance;
 	struct Entity* e;
@@ -179,7 +151,8 @@ static void AddEntity(cc_uint8* data, EntityID id, const cc_string* name, const 
 	Entity_SetName(e, name);
 
 	if (!readPosition) return;
-	Classic_ReadAbsoluteLocation(data, id, false);
+	Classic_ReadAbsoluteLocation(data, id,
+		LU_HAS_POS | LU_HAS_YAW | LU_HAS_PITCH | LU_POS_ABSOLUTE_INSTANT);
 	if (id != ENTITIES_SELF_ID) return;
 
 	p->Spawn      = p->Base.Position;
@@ -189,18 +162,14 @@ static void AddEntity(cc_uint8* data, EntityID id, const cc_string* name, const 
 
 void Protocol_RemoveEntity(EntityID id) {
 	struct Entity* e = Entities.List[id];
-	if (!e) return;
-	if (id != ENTITIES_SELF_ID) Entities_Remove(id);
+	if (!e || id == ENTITIES_SELF_ID) return;
 
-	/* See comment about some servers in Classic_AddEntity */
-	if (!Classic_TabList_Get(id)) return;
-	TabList_Remove(id);
-	Classic_TabList_Reset(id);
+	Entities_Remove(id);
 }
 
-static void UpdateLocation(EntityID id, struct LocationUpdate* update, cc_bool interpolate) {
+static void UpdateLocation(EntityID id, struct LocationUpdate* update) {
 	struct Entity* e = Entities.List[id];
-	if (e) { e->VTABLE->SetLocation(e, update, interpolate); }
+	if (e) { e->VTABLE->SetLocation(e, update); }
 }
 
 static void UpdateUserType(struct HacksComp* hacks, cc_uint8 value) {
@@ -243,7 +212,7 @@ static void WoM_CheckMotd(void) {
 
 	/* Ensure that if the user quickly changes to a different world, env settings from old world aren't
 	applied in the new world if the async 'get env request' didn't complete before the old world was unloaded */
-	wom_identifier = Http_AsyncGetData(&url, true);
+	wom_identifier = Http_AsyncGetData(&url, HTTP_FLAG_PRIORITY);
 	wom_sendId = true;
 }
 
@@ -256,9 +225,9 @@ static void WoM_CheckSendWomID(void) {
 	}
 }
 
-static PackedCol WoM_ParseCol(const cc_string* value, PackedCol defaultCol) {
+static PackedCol WoM_ParseCol(const cc_string* value, PackedCol defaultColor) {
 	int argb;
-	if (!Convert_ParseInt(value, &argb)) return defaultCol;
+	if (!Convert_ParseInt(value, &argb)) return defaultColor;
 	return PackedCol_Make(argb >> 16, argb >> 8, argb, 255);
 }
 
@@ -277,13 +246,13 @@ static void WoM_ParseConfig(struct HttpRequest* item) {
 		if (!String_UNSAFE_Separate(&line, '=', &key, &value)) continue;
 
 		if (String_CaselessEqualsConst(&key, "environment.cloud")) {
-			col = WoM_ParseCol(&value, ENV_DEFAULT_CLOUDS_COL);
+			col = WoM_ParseCol(&value, ENV_DEFAULT_CLOUDS_COLOR);
 			Env_SetCloudsCol(col);
 		} else if (String_CaselessEqualsConst(&key, "environment.sky")) {
-			col = WoM_ParseCol(&value, ENV_DEFAULT_SKY_COL);
+			col = WoM_ParseCol(&value, ENV_DEFAULT_SKY_COLOR);
 			Env_SetSkyCol(col);
 		} else if (String_CaselessEqualsConst(&key, "environment.fog")) {
-			col = WoM_ParseCol(&value, ENV_DEFAULT_FOG_COL);
+			col = WoM_ParseCol(&value, ENV_DEFAULT_FOG_COLOR);
 			Env_SetFogCol(col);
 		} else if (String_CaselessEqualsConst(&key, "environment.level")) {
 			if (Convert_ParseInt(&value, &waterLevel)) {
@@ -303,16 +272,124 @@ static void WoM_Reset(void) {
 static void WoM_Tick(void) {
 	struct HttpRequest item;
 	if (!Http_GetResult(wom_identifier, &item)) return;
-	if (!item.success) return;
 
-	WoM_ParseConfig(&item);
-	Mem_Free(item.data);
+	if (item.success) WoM_ParseConfig(&item);
+	HttpRequest_Free(&item);
+}
+
+
+/*########################################################################################################################*
+*----------------------------------------------------Map decompressor-----------------------------------------------------*
+*#########################################################################################################################*/
+#define MAP_SIZE_LEN 4
+
+struct MapState {
+	struct InflateState inflateState;
+	struct Stream stream;
+	BlockRaw* blocks;
+	struct GZipHeader gzHeader;
+	cc_uint8 size[MAP_SIZE_LEN];
+	int index, sizeIndex;
+	cc_bool allocFailed;
+};
+static struct MapState map1;
+#ifdef EXTENDED_BLOCKS
+static struct MapState map2;
+#endif
+
+static void DisconnectInvalidMap(cc_result res) {
+	static const cc_string title  = String_FromConst("Disconnected");
+	cc_string tmp; char tmpBuffer[STRING_SIZE];
+	String_InitArray(tmp, tmpBuffer);
+
+	String_Format1(&tmp, "Server sent corrupted map data (error %h)", &res);
+	Game_Disconnect(&title, &tmp); return;
+}
+
+static void MapState_Init(struct MapState* m) {
+	Inflate_MakeStream2(&m->stream, &m->inflateState, &map_part);
+	GZipHeader_Init(&m->gzHeader);
+
+	m->index       = 0;
+	m->blocks      = NULL;
+	m->sizeIndex   = 0;
+	m->allocFailed = false;
+}
+
+static CC_INLINE void MapState_SkipHeader(struct MapState* m) {
+	m->gzHeader.done = true;
+	m->sizeIndex     = MAP_SIZE_LEN;
+}
+
+static void FreeMapStates(void) {
+	Mem_Free(map1.blocks);
+	map1.blocks = NULL;
+#ifdef EXTENDED_BLOCKS
+	Mem_Free(map2.blocks);
+	map2.blocks = NULL;
+#endif
+}
+
+static cc_result MapState_Read(struct MapState* m) {
+	cc_uint32 left, read;
+	cc_result res;
+	if (m->allocFailed) return 0;
+
+	if (m->sizeIndex < MAP_SIZE_LEN) {
+		left = MAP_SIZE_LEN - m->sizeIndex;
+		res  = m->stream.Read(&m->stream, &m->size[m->sizeIndex], left, &read); 
+
+		m->sizeIndex += read;
+		if (res) return res;
+
+		/* 0.01% chance to happen, but still possible */
+		if (m->sizeIndex < MAP_SIZE_LEN) return 0;
+	}
+
+	if (!map_volume) map_volume = Stream_GetU32_BE(m->size);
+
+	if (!m->blocks) {
+		m->blocks = (BlockRaw*)Mem_TryAlloc(map_volume, 1);
+		/* unlikely but possible */
+		if (!m->blocks) {
+			Window_ShowDialog("Out of memory", "Not enough free memory to join that map.\nTry joining a different map.");
+			m->allocFailed = true;
+			return 0;
+		}
+	}
+
+	left = map_volume - m->index;
+	res  = m->stream.Read(&m->stream, &m->blocks[m->index], left, &read);
+
+	m->index += read;
+	return res;
 }
 
 
 /*########################################################################################################################*
 *----------------------------------------------------Classic protocol-----------------------------------------------------*
 *#########################################################################################################################*/
+void Classic_SendLogin(void) {
+	cc_uint8 data[131];
+	data[0] = OPCODE_HANDSHAKE;
+	{
+		data[1]   = Game_Version.Protocol;
+		WriteString(&data[2],  &Game_Username);
+		WriteString(&data[66], &Game_Mppass);
+
+		/* The 'user type' field's behaviour depends on protocol version: */
+		/*   version 7 - 0x42 specifies CPE client, any other value is ignored? */
+		/*   version 6 - any value ignored? */
+		/*   version 5 - field doesn't exist */
+		/* Theroetically, this means packet size is 131 bytes for 6/7, 130 bytes for 5 and below. */
+		/* In practice, some version 7 server software always expects to read 131 bytes for handshake packet, */
+		/*  and will get stuck waiting for data if client connects using version 5 and only sends 130 bytes */
+		/* To workaround this, include a 'ping packet' after 'version 5 handshake packet' - version 5 server software */
+		/*  will do nothing with the ping packet, and the aforementioned server software will be happy with 131 bytes */
+		data[130] = Game_UseCPE ? 0x42 : (Game_Version.Protocol <= PROTOCOL_0019 ? OPCODE_PING : 0x00);
+	}
+	Server.SendData(data, 131);
+}
 
 void Classic_SendChat(const cc_string* text, cc_bool partial) {
 	cc_uint8 data[66];
@@ -324,11 +401,10 @@ void Classic_SendChat(const cc_string* text, cc_bool partial) {
 	Server.SendData(data, 66);
 }
 
-void Classic_WritePosition(Vec3 pos, float yaw, float pitch) {
+static cc_uint8* Classic_WritePosition(cc_uint8* data, Vec3 pos, float yaw, float pitch) {
 	BlockID payload;
 	int x, y, z;
 
-	cc_uint8* data = Server.WriteBuffer;
 	*data++ = OPCODE_ENTITY_TELEPORT;
 	{
 		payload = cpe_sendHeldBlock ? Inventory_SelectedBlock : ENTITIES_SELF_ID;
@@ -350,11 +426,13 @@ void Classic_WritePosition(Vec3 pos, float yaw, float pitch) {
 		*data++ = Math_Deg2Packed(yaw);
 		*data++ = Math_Deg2Packed(pitch);
 	}
-	Server.WriteBuffer = data;
+	return data;
 }
 
-void Classic_WriteSetBlock(int x, int y, int z, cc_bool place, BlockID block) {
-	cc_uint8* data = Server.WriteBuffer;
+void Classic_SendSetBlock(int x, int y, int z, cc_bool place, BlockID block) {
+	cc_uint8 tmp[32];
+	cc_uint8* data = tmp;
+
 	*data++ = OPCODE_SET_BLOCK_CLIENT;
 	{
 		Stream_SetU16_BE(data, x); data += 2;
@@ -363,19 +441,7 @@ void Classic_WriteSetBlock(int x, int y, int z, cc_bool place, BlockID block) {
 		*data++ = place;
 		WriteBlock(data, block);
 	}
-	Server.WriteBuffer = data;
-}
-
-void Classic_SendLogin(void) {
-	cc_uint8 data[131];
-	data[0] = OPCODE_HANDSHAKE;
-	{
-		data[1] = 7; /* protocol version */
-		WriteString(&data[2],  &Game_Username);
-		WriteString(&data[66], &Game_Mppass);
-		data[130] = Game_UseCPE ? 0x42 : 0x00;
-	}
-	Server.SendData(data, 131);
+	Server.SendData(tmp, (cc_uint32)(data - tmp));
 }
 
 static void Classic_Handshake(cc_uint8* data) {
@@ -399,69 +465,17 @@ static void Classic_Handshake(cc_uint8* data) {
 
 static void Classic_Ping(cc_uint8* data) { }
 
-#define MAP_SIZE_LEN 4
-static void DisconnectInvalidMap(cc_result res) {
-	static const cc_string title  = String_FromConst("Disconnected");
-	cc_string tmp; char tmpBuffer[STRING_SIZE];
-	String_InitArray(tmp, tmpBuffer);
-
-	String_Format1(&tmp, "Server sent corrupted map data (error %h)", &res);
-	Game_Disconnect(&title, &tmp); return;
-}
-
-static void MapState_Init(struct MapState* m) {
-	Inflate_MakeStream2(&m->stream, &m->inflateState, &map_part);
-	m->index  = 0;
-	m->blocks = NULL;
-	m->allocFailed = false;
-}
-
-static void FreeMapStates(void) {
-	Mem_Free(map.blocks);
-	map.blocks  = NULL;
-#ifdef EXTENDED_BLOCKS
-	Mem_Free(map2.blocks);
-	map2.blocks = NULL;
-#endif
-}
-
-static void MapState_Read(struct MapState* m) {
-	cc_uint32 left, read;
-	cc_result res;
-	if (m->allocFailed) return;
-
-	if (!m->blocks) {
-		m->blocks = (BlockRaw*)Mem_TryAlloc(map_volume, 1);
-		/* unlikely but possible */
-		if (!m->blocks) {
-			Window_ShowDialog("Out of memory", "Not enough free memory to join that map.\nTry joining a different map.");
-			m->allocFailed = true;
-			return;
-		}
-	}
-
-	left = map_volume - m->index;
-	res  = m->stream.Read(&m->stream, &m->blocks[m->index], left, &read);
-
-	if (res) DisconnectInvalidMap(res);
-	m->index += read;
-}
-
 static void Classic_StartLoading(void) {
 	World_NewMap();
-	Stream_ReadonlyMemory(&map_part, NULL, 0);
-
 	LoadingScreen_Show(&Server.Name, &Server.MOTD);
 	WoM_CheckMotd();
 	classic_receivedFirstPos = false;
 
-	GZipHeader_Init(&map_gzHeader);
 	map_begunLoading = true;
-	map_sizeIndex    = 0;
 	map_receiveBeg   = Stopwatch_Measure();
 	map_volume       = 0;
 
-	MapState_Init(&map);
+	MapState_Init(&map1);
 #ifdef EXTENDED_BLOCKS
 	MapState_Init(&map2);
 #endif
@@ -475,65 +489,55 @@ static void Classic_LevelInit(cc_uint8* data) {
 	if (!cpe_fastMap) return;
 
 	/* Fast map puts volume in header, and uses raw DEFLATE without GZIP header/footer */
-	map_volume    = Stream_GetU32_BE(data);
-	map_gzHeader.done = true;
-	map_sizeIndex = MAP_SIZE_LEN;
+	map_volume = Stream_GetU32_BE(data);
+	MapState_SkipHeader(&map1);
+#ifdef EXTENDED_BLOCKS
+	MapState_SkipHeader(&map2);
+#endif
 }
 
 static void Classic_LevelDataChunk(cc_uint8* data) {
+	struct MapState* m;
 	int usedLength;
 	float progress;
-	cc_uint32 left, read;
-	cc_uint8 value;
 	cc_result res;
 
 	/* Workaround for some servers that send LevelDataChunk before LevelInit due to their async sending behaviour */
 	if (!map_begunLoading) Classic_StartLoading();
-	usedLength = Stream_GetU16_BE(data); data += 2;
+	usedLength = Stream_GetU16_BE(data);
 
-	map_part.Meta.Mem.Cur    = data;
-	map_part.Meta.Mem.Base   = data;
+	map_part.Meta.Mem.Cur    = data + 2;
+	map_part.Meta.Mem.Base   = data + 2;
 	map_part.Meta.Mem.Left   = usedLength;
 	map_part.Meta.Mem.Length = usedLength;
 
-	data += 1024;
-	value = *data; /* progress in original classic, but we ignore it */
+#ifndef EXTENDED_BLOCKS
+	m = &map1;
+#else
+	/* progress byte in original classic, but we ignore it */
+	if (cpe_extBlocks && data[1026]) {
+		m = &map2;
+	} else {
+		m = &map1;
+	}
+#endif
 
-	if (!map_gzHeader.done) {
-		res = GZipHeader_Read(&map_part, &map_gzHeader);
+	if (!m->gzHeader.done) {
+		res = GZipHeader_Read(&map_part, &m->gzHeader);
 		if (res && res != ERR_END_OF_STREAM) { DisconnectInvalidMap(res); return; }
 	}
 
-	if (map_gzHeader.done) {
-		if (map_sizeIndex < MAP_SIZE_LEN) {
-			left = MAP_SIZE_LEN - map_sizeIndex;
-			res  = map.stream.Read(&map.stream, &map_size[map_sizeIndex], left, &read); 
-
-			if (res) { DisconnectInvalidMap(res); return; }
-			map_sizeIndex += read;
-		}
-
-		if (map_sizeIndex == MAP_SIZE_LEN) {
-			if (!map_volume) map_volume = Stream_GetU32_BE(map_size);
-
-#ifndef EXTENDED_BLOCKS
-			MapState_Read(&map);
-#else
-			if (cpe_extBlocks && value) {
-				MapState_Read(&map2);
-			} else {
-				MapState_Read(&map);
-			}
-#endif
-		}
+	if (m->gzHeader.done) {
+		res = MapState_Read(m);
+		if (res) { DisconnectInvalidMap(res); return; }
 	}
 
-	progress = !map.blocks ? 0.0f : (float)map.index / map_volume;
+	progress = !map_volume ? 0.0f : (float)map1.index / map_volume;
 	Event_RaiseFloat(&WorldEvents.Loading, progress);
 }
 
 static void Classic_LevelFinalise(cc_uint8* data) {
-	int width, height, length;
+	int width, height, length, volume;
 	cc_uint64 end;
 	int delta;
 
@@ -550,10 +554,15 @@ static void Classic_LevelFinalise(cc_uint8* data) {
 	width  = Stream_GetU16_BE(data + 0);
 	height = Stream_GetU16_BE(data + 2);
 	length = Stream_GetU16_BE(data + 4);
+	volume = width * height * length;
 
-	if (map_volume != (width * height * length)) {
+	if (!map1.blocks) {
 		Chat_AddRaw("&cFailed to load map, try joining a different map");
-		Chat_AddRaw("   &cBlocks array size does not match volume of map");
+		Chat_AddRaw("   &cAttempted to load map without a Blocks array");
+	}
+	if (map_volume != volume) {
+		Chat_AddRaw("&cFailed to load map, try joining a different map");
+		Chat_Add2(  "   &cBlocks array size (%i) does not match volume of map (%i)", &map_volume, &volume);
 		FreeMapStates();
 	}
 	
@@ -562,8 +571,8 @@ static void Classic_LevelFinalise(cc_uint8* data) {
 	if (cpe_extBlocks && map2.blocks) World_SetMapUpper(map2.blocks);
 	map2.blocks = NULL;
 #endif
-	World_SetNewMap(map.blocks, width, height, length);
-	map.blocks  = NULL;
+	World_SetNewMap(map1.blocks, width, height, length);
+	map1.blocks  = NULL;
 }
 
 static void Classic_SetBlock(cc_uint8* data) {
@@ -595,54 +604,48 @@ static void Classic_AddEntity(cc_uint8* data) {
 	AddEntity(data, id, &name, &skin, true);
 
 	/* Workaround for some servers that declare support for ExtPlayerList but don't send ExtAddPlayerName */
-	AddTablistEntry(id, &name, &name, &group, 0);
-	Classic_TabList_Set(id);
+	TabList_Set(id, &name, &name, &group, 0);
+	TabList_EntityLinked_Set(id);
 }
 
 static void Classic_EntityTeleport(cc_uint8* data) {
 	EntityID id = *data++;
-	Classic_ReadAbsoluteLocation(data, id, true);
+	Classic_ReadAbsoluteLocation(data, id, 
+		LU_HAS_POS | LU_HAS_YAW | LU_HAS_PITCH | LU_POS_ABSOLUTE_SMOOTH | LU_ORI_INTERPOLATE);
 }
 
 static void Classic_RelPosAndOrientationUpdate(cc_uint8* data) {
 	struct LocationUpdate update;
 	EntityID id = data[0];
-	Vec3 pos;
-	float yaw, pitch;
 
-	pos.X = (cc_int8)data[1] / 32.0f;
-	pos.Y = (cc_int8)data[2] / 32.0f;
-	pos.Z = (cc_int8)data[3] / 32.0f;
-	yaw   = Math_Packed2Deg(data[4]);
-	pitch = Math_Packed2Deg(data[5]);
-
-	LocationUpdate_MakePosAndOri(&update, pos, yaw, pitch, true);
-	UpdateLocation(id, &update, true);
+	update.flags = LU_HAS_POS | LU_HAS_YAW | LU_HAS_PITCH | LU_POS_RELATIVE_SMOOTH | LU_ORI_INTERPOLATE;
+	update.pos.X = (cc_int8)data[1] / 32.0f;
+	update.pos.Y = (cc_int8)data[2] / 32.0f;
+	update.pos.Z = (cc_int8)data[3] / 32.0f;
+	update.yaw   = Math_Packed2Deg(data[4]);
+	update.pitch = Math_Packed2Deg(data[5]);
+	UpdateLocation(id, &update);
 }
 
 static void Classic_RelPositionUpdate(cc_uint8* data) {
 	struct LocationUpdate update;
 	EntityID id = data[0];
-	Vec3 pos;
 
-	pos.X = (cc_int8)data[1] / 32.0f;
-	pos.Y = (cc_int8)data[2] / 32.0f;
-	pos.Z = (cc_int8)data[3] / 32.0f;
-
-	LocationUpdate_MakePos(&update, pos, true);
-	UpdateLocation(id, &update, true);
+	update.flags = LU_HAS_POS | LU_POS_RELATIVE_SMOOTH | LU_ORI_INTERPOLATE;
+	update.pos.X = (cc_int8)data[1] / 32.0f;
+	update.pos.Y = (cc_int8)data[2] / 32.0f;
+	update.pos.Z = (cc_int8)data[3] / 32.0f;
+	UpdateLocation(id, &update);
 }
 
 static void Classic_OrientationUpdate(cc_uint8* data) {
 	struct LocationUpdate update;
 	EntityID id = data[0];
-	float yaw, pitch;
 
-	yaw   = Math_Packed2Deg(data[1]);
-	pitch = Math_Packed2Deg(data[2]);
-
-	LocationUpdate_MakeOri(&update, yaw, pitch);
-	UpdateLocation(id, &update, true);
+	update.flags = LU_HAS_YAW | LU_HAS_PITCH | LU_ORI_INTERPOLATE;
+	update.yaw   = Math_Packed2Deg(data[1]);
+	update.pitch = Math_Packed2Deg(data[2]);
+	UpdateLocation(id, &update);
 }
 
 static void Classic_RemoveEntity(cc_uint8* data) {
@@ -686,11 +689,10 @@ static void Classic_SetPermission(cc_uint8* data) {
 	HacksComp_RecheckFlags(hacks);
 }
 
-static void Classic_ReadAbsoluteLocation(cc_uint8* data, EntityID id, cc_bool interpolate) {
+static void Classic_ReadAbsoluteLocation(cc_uint8* data, EntityID id, cc_uint8 flags) {
 	struct LocationUpdate update;
 	int x, y, z;
-	Vec3 pos;
-	float yaw, pitch;
+	cc_uint8 mode;
 
 	if (cpe_extEntityPos) {
 		x = (int)Stream_GetU32_BE(&data[0]);
@@ -704,23 +706,34 @@ static void Classic_ReadAbsoluteLocation(cc_uint8* data, EntityID id, cc_bool in
 		data += 6;
 	}
 
-	y -= 51; /* Convert to feet position */
-	if (id == ENTITIES_SELF_ID) y += 22;
+	mode = flags & LU_POS_MODEMASK;
+	if (mode == LU_POS_ABSOLUTE_SMOOTH || mode == LU_POS_ABSOLUTE_INSTANT) { /* Only perform height shifts on absolute updates */
+		y -= 51; /* Convert to feet position */
+		/* The original classic client behaves strangely in that */
+		/*   Y+0  is sent back to the server for next client->server position update */
+		/*   Y+22 is sent back to the server for all subsequent position updates */
+		/* so to simplify things, just always add 22 to Y*/
+		if (id == ENTITIES_SELF_ID) y += 22;
+	}
 
-	pos.X = x/32.0f; pos.Y = y/32.0f; pos.Z = z/32.0f;
-	yaw   = Math_Packed2Deg(*data++);
-	pitch = Math_Packed2Deg(*data++);
+	update.flags = flags;
+	update.pos.X = x/32.0f; 
+	update.pos.Y = y/32.0f; 
+	update.pos.Z = z/32.0f;
+	update.yaw   = Math_Packed2Deg(*data++);
+	update.pitch = Math_Packed2Deg(*data++);
 
 	if (id == ENTITIES_SELF_ID) classic_receivedFirstPos = true;
-	LocationUpdate_MakePosAndOri(&update, pos, yaw, pitch, false);
-	UpdateLocation(id, &update, interpolate);
+	UpdateLocation(id, &update);
 }
 
+#define Classic_HandshakeSize() (Game_Version.Protocol > PROTOCOL_0019 ? 131 : 130)
 static void Classic_Reset(void) {
+	Stream_ReadonlyMemory(&map_part, NULL, 0);
 	map_begunLoading = false;
 	classic_receivedFirstPos = false;
 
-	Net_Set(OPCODE_HANDSHAKE, Classic_Handshake, 131);
+	Net_Set(OPCODE_HANDSHAKE, Classic_Handshake, Classic_HandshakeSize());
 	Net_Set(OPCODE_PING, Classic_Ping, 1);
 	Net_Set(OPCODE_LEVEL_BEGIN, Classic_LevelInit, 1);
 	Net_Set(OPCODE_LEVEL_DATA, Classic_LevelDataChunk, 1028);
@@ -739,26 +752,26 @@ static void Classic_Reset(void) {
 	Net_Set(OPCODE_SET_PERMISSION, Classic_SetPermission, 2);
 }
 
-static void Classic_Tick(void) {
-	struct LocalPlayer* p = &LocalPlayer_Instance;
-	struct Entity* e      = &LocalPlayer_Instance.Base;
-	if (!classic_receivedFirstPos) return;
+static cc_uint8* Classic_Tick(cc_uint8* data) {
+	struct Entity* e = &LocalPlayer_Instance.Base;
+	if (!classic_receivedFirstPos) return data;
+
 	/* Report end position of each physics tick, rather than current position */
 	/*  (otherwise can miss landing on a block then jumping off of it again) */
-	Classic_WritePosition(p->Interp.Next.Pos, e->Yaw, e->Pitch);
+	return Classic_WritePosition(data, e->next.pos, e->Yaw, e->Pitch);
 }
 
 
 /*########################################################################################################################*
 *------------------------------------------------------CPE protocol-------------------------------------------------------*
 *#########################################################################################################################*/
-static const char* cpe_clientExtensions[35] = {
+static const char* cpe_clientExtensions[] = {
 	"ClickDistance", "CustomBlocks", "HeldBlock", "EmoteFix", "TextHotKey", "ExtPlayerList",
 	"EnvColors", "SelectionCuboid", "BlockPermissions", "ChangeModel", "EnvMapAppearance",
 	"EnvWeatherType", "MessageTypes", "HackControl", "PlayerClick", "FullCP437", "LongerMessages",
 	"BlockDefinitions", "BlockDefinitionsExt", "BulkBlockUpdate", "TextColors", "EnvMapAspect",
 	"EntityProperty", "ExtEntityPositions", "TwoWayPing", "InventoryOrder", "InstantMOTD", "FastMap", "SetHotbar",
-	"SetSpawnpoint", "VelocityControl", "CustomParticles", "CustomModels",
+	"SetSpawnpoint", "VelocityControl", "CustomParticles", "CustomModels", "PluginMessages", "ExtEntityTeleport",
 	/* NOTE: These must be placed last for when EXTENDED_TEXTURES or EXTENDED_BLOCKS are not defined */
 	"ExtendedTextures", "ExtendedBlocks"
 };
@@ -782,7 +795,7 @@ void CPE_SendPlayerClick(int button, cc_bool pressed, cc_uint8 targetId, struct 
 		Stream_SetU16_BE(&data[12], t->pos.Z);
 
 		data[14] = 255;
-		/* Our own face values differ from CPE block face */
+		/* FACE enum values differ from CPE block face values */
 		switch (t->Closest) {
 		case FACE_XMAX: data[14] = 0; break;
 		case FACE_XMIN: data[14] = 1; break;
@@ -793,6 +806,19 @@ void CPE_SendPlayerClick(int button, cc_bool pressed, cc_uint8 targetId, struct 
 		}
 	}
 	Server.SendData(data, 15);
+}
+
+void CPE_SendPluginMessage(cc_uint8 channel, cc_uint8* data) {
+	cc_uint8 buffer[66];
+
+	if (!cpe_pluginMessages) return;
+
+	buffer[0] = OPCODE_PLUGIN_MESSAGE;
+	{
+		buffer[1] = channel;
+		Mem_Copy(buffer + 2, data, 64);
+	}
+	Server.SendData(buffer, 66);
 }
 
 static void CPE_SendExtInfo(int extsCount) {
@@ -815,14 +841,13 @@ static void CPE_SendExtEntry(const cc_string* extName, int extVersion) {
 	Server.SendData(data, 69);
 }
 
-static void CPE_WriteTwoWayPing(cc_bool serverToClient, int id) {
-	cc_uint8* data = Server.WriteBuffer; 
+static cc_uint8* CPE_WriteTwoWayPing(cc_uint8* data, cc_bool serverToClient, int id) {
 	*data++ = OPCODE_TWO_WAY_PING;
 	{
 		*data++ = serverToClient;
 		Stream_SetU16_BE(data, id); data += 2;
 	}
-	Server.WriteBuffer = data;
+	return data;
 }
 
 static void CPE_SendCpeExtInfoReply(void) {
@@ -917,10 +942,11 @@ static void CPE_ExtEntry(cc_uint8* data) {
 		if (version == 1) return;
 		Protocol.Sizes[OPCODE_DEFINE_BLOCK_EXT] += 3;
 	} else if (String_CaselessEqualsConst(&ext, "ExtEntityPositions")) {
-		Protocol.Sizes[OPCODE_ENTITY_TELEPORT] += 6;
-		Protocol.Sizes[OPCODE_ADD_ENTITY]      += 6;
-		Protocol.Sizes[OPCODE_EXT_ADD_ENTITY2] += 6;
-		Protocol.Sizes[OPCODE_SET_SPAWNPOINT]  += 6;
+		Protocol.Sizes[OPCODE_ENTITY_TELEPORT]     += 6;
+		Protocol.Sizes[OPCODE_ADD_ENTITY]          += 6;
+		Protocol.Sizes[OPCODE_EXT_ADD_ENTITY2]     += 6;
+		Protocol.Sizes[OPCODE_SET_SPAWNPOINT]      += 6;
+		Protocol.Sizes[OPCODE_ENTITY_TELEPORT_EXT] += 6;
 		cpe_extEntityPos = true;
 	} else if (String_CaselessEqualsConst(&ext, "TwoWayPing")) {
 		cpe_twoWayPing = true;
@@ -932,6 +958,8 @@ static void CPE_ExtEntry(cc_uint8* data) {
 		if (version == 2) {
 			Protocol.Sizes[OPCODE_DEFINE_MODEL_PART] = 167;
 		}
+	} else if (String_CaselessEqualsConst(&ext, "PluginMessages")) {
+		cpe_pluginMessages = true;
 	}
 #ifdef EXTENDED_TEXTURES
 	else if (String_CaselessEqualsConst(&ext, "ExtendedTextures")) {
@@ -993,16 +1021,18 @@ static void CPE_SetTextHotkey(cc_uint8* data) {
 	if (keyCode > 255) return;
 	key = Hotkeys_LWJGL[keyCode];
 	if (!key) return;
-	Platform_Log3("CPE hotkey added: %c, %b: %s", Input_Names[key], &keyMods, &action);
+	Platform_Log3("CPE hotkey added: %c, %b: %s", Input_DisplayNames[key], &keyMods, &action);
 
 	if (!action.length) {
 		Hotkeys_Remove(key, keyMods);
 		StoredHotkeys_Load(key, keyMods);
 	} else if (action.buffer[action.length - 1] == '\n') {
 		action.length--;
-		Hotkeys_Add(key, keyMods, &action, false);
+		Hotkeys_Add(key, keyMods, &action, 
+					HOTKEY_FLAG_AUTO_DEFINED);
 	} else { /* more input needed by user */
-		Hotkeys_Add(key, keyMods, &action, true);
+		Hotkeys_Add(key, keyMods, &action, 
+					HOTKEY_FLAG_AUTO_DEFINED | HOTKEY_FLAG_STAYS_OPEN);
 	}
 }
 
@@ -1017,8 +1047,8 @@ static void CPE_ExtAddPlayerName(cc_uint8* data) {
 	RemoveEndPlus(&listName);
 
 	/* Workarond for server software that declares support for ExtPlayerList, but sends AddEntity then AddPlayerName */
-	Classic_TabList_Reset(id);
-	AddTablistEntry(id, &playerName, &listName, &groupName, groupRank);
+	TabList_EntityLinked_Reset(id);
+	TabList_Set(id, &playerName, &listName, &groupName, groupRank);
 }
 
 static void CPE_ExtAddEntity(cc_uint8* data) {
@@ -1071,17 +1101,17 @@ static void CPE_SetEnvCol(cc_uint8* data) {
 	c = PackedCol_Make(data[2], data[4], data[6], 255);
 
 	if (variable == 0) {
-		Env_SetSkyCol(invalid    ? ENV_DEFAULT_SKY_COL    : c);
+		Env_SetSkyCol(invalid    ? ENV_DEFAULT_SKY_COLOR    : c);
 	} else if (variable == 1) {
-		Env_SetCloudsCol(invalid ? ENV_DEFAULT_CLOUDS_COL : c);
+		Env_SetCloudsCol(invalid ? ENV_DEFAULT_CLOUDS_COLOR : c);
 	} else if (variable == 2) {
-		Env_SetFogCol(invalid    ? ENV_DEFAULT_FOG_COL    : c);
+		Env_SetFogCol(invalid    ? ENV_DEFAULT_FOG_COLOR    : c);
 	} else if (variable == 3) {
-		Env_SetShadowCol(invalid ? ENV_DEFAULT_SHADOW_COL : c);
+		Env_SetShadowCol(invalid ? ENV_DEFAULT_SHADOW_COLOR : c);
 	} else if (variable == 4) {
-		Env_SetSunCol(invalid    ? ENV_DEFAULT_SUN_COL    : c);
+		Env_SetSunCol(invalid    ? ENV_DEFAULT_SUN_COLOR    : c);
 	} else if (variable == 5) {
-		Env_SetSkyboxCol(invalid ? ENV_DEFAULT_SKYBOX_COL : c);
+		Env_SetSkyboxCol(invalid ? ENV_DEFAULT_SKYBOX_COLOR : c);
 	}
 }
 
@@ -1201,7 +1231,7 @@ static void CPE_SetTextColor(cc_uint8* data) {
 	BitmapCol c   = BitmapCol_Make(data[0], data[1], data[2], data[3]);
 	cc_uint8 code = data[4];
 
-	/* disallow space, null, and colour code specifiers */
+	/* disallow space, null, and color code specifiers */
 	if (code == '\0' || code == ' ' || code == 0xFF) return;
 	if (code == '%'  || code == '&') return;
 
@@ -1255,7 +1285,7 @@ static void CPE_SetMapEnvProperty(cc_uint8* data) {
 }
 
 static void CPE_SetEntityProperty(cc_uint8* data) {
-	struct LocationUpdate update = { 0 };
+	struct LocationUpdate update;
 	struct Entity* e;
 	float scale;
 
@@ -1268,14 +1298,14 @@ static void CPE_SetEntityProperty(cc_uint8* data) {
 
 	switch (type) {
 	case 0:
-		update.Flags = LOCATIONUPDATE_ROTX;
-		update.RotX  = LocationUpdate_Clamp((float)value); break;
+		update.flags = LU_HAS_ROTX | LU_ORI_INTERPOLATE;
+		update.rotX  = (float)value; break;
 	case 1:
-		update.Flags = LOCATIONUPDATE_YAW;
-		update.Yaw   = LocationUpdate_Clamp((float)value); break;
+		update.flags = LU_HAS_YAW  | LU_ORI_INTERPOLATE;
+		update.yaw   = (float)value; break;
 	case 2:
-		update.Flags = LOCATIONUPDATE_ROTZ;
-		update.RotZ  = LocationUpdate_Clamp((float)value); break;
+		update.flags = LU_HAS_ROTZ | LU_ORI_INTERPOLATE;
+		update.rotZ  = (float)value; break;
 
 	case 3:
 	case 4:
@@ -1294,17 +1324,20 @@ static void CPE_SetEntityProperty(cc_uint8* data) {
 	default:
 		return;
 	}
-	e->VTABLE->SetLocation(e, &update, true);
+	e->VTABLE->SetLocation(e, &update);
 }
 
 static void CPE_TwoWayPing(cc_uint8* data) {
 	cc_uint8 serverToClient = data[0];
 	int id = Stream_GetU16_BE(data + 1);
+	cc_uint8 tmp[32];
 
-	if (serverToClient) {
-		CPE_WriteTwoWayPing(true, id); /* server to client reply */
-		Net_SendPacket();
-	} else { Ping_Update(id); }
+	/* handle client>server ping response from server */
+	if (!serverToClient) { Ping_Update(id); return; }
+
+	/* send server>client ping response to server */
+	data = CPE_WriteTwoWayPing(tmp, true, id);
+	Server.SendData(tmp, (cc_uint32)(data - tmp));
 }
 
 static void CPE_SetInventoryOrder(cc_uint8* data) {
@@ -1355,6 +1388,9 @@ static void CalcVelocity(float* vel, cc_uint8* src, cc_uint8 mode) {
 
 	if (mode == 0) *vel += value;
 	if (mode == 1) *vel = value;
+
+	if (*vel < -1024) *vel = -1024;
+	if (*vel > +1024) *vel = +1024;
 }
 
 static void CPE_VelocityControl(cc_uint8* data) {
@@ -1442,15 +1478,8 @@ static void CPE_DefineModel(cc_uint8* data) {
 	numParts   = data[114];
 
 	if (numParts > MAX_CUSTOM_MODEL_PARTS) {
-		cc_string msg; char msgBuffer[256];
-		String_InitArray(msg, msgBuffer);
-
-		String_Format1(
-			&msg,
-			"&cCustom Model '%s' exceeds parts limit of " STRINGIFY(MAX_CUSTOM_MODEL_PARTS),
-			&name
-		);
-		Logger_WarnFunc(&msg);
+		int maxParts = MAX_CUSTOM_MODEL_PARTS;
+		Chat_Add2("&cCustom Model '%s' exceeds parts limit of %i", &name, &maxParts);
 		return;
 	}
 
@@ -1527,13 +1556,38 @@ static void CPE_UndefineModel(cc_uint8* data) {
 	if (id < MAX_CUSTOM_MODELS) CustomModel_Undefine(&custom_models[id]);
 }
 
+static void CPE_PluginMessage(cc_uint8* data) {
+	cc_uint8 channel = data[0];
+	Event_RaisePluginMessage(&NetEvents.PluginMessageReceived, channel, data + 1);
+}
+
+static void CPE_ExtEntityTeleport(cc_uint8* data) {
+	EntityID id = *data++;
+	cc_uint8 packetFlags = *data++;
+	cc_uint8 flags = 0;
+
+	/* bit  0    includes position */
+	/* bits 1-2  position mode(absolute_instant / absolute_smooth / relative_smooth / relative_seamless) */
+	/* bit  3    unused */
+	/* bit  4    includes orientation */
+	/* bit  5    interpolate ori */
+	/* bit  6-7  unused */
+
+	if (packetFlags & 1) flags |= LU_HAS_POS;
+	flags |= (packetFlags & 6) << 4; /* bit-and with 00000110 to isolate only pos mode, then left shift by 4 to match client mode offset */
+	if (packetFlags & 16) flags |= LU_HAS_PITCH | LU_HAS_YAW;
+	if (packetFlags & 32) flags |= LU_ORI_INTERPOLATE;
+
+	Classic_ReadAbsoluteLocation(data, id, flags);
+}
+
 static void CPE_Reset(void) {
 	cpe_serverExtensionsCount = 0; cpe_pingTicks = 0;
 	cpe_sendHeldBlock = false; cpe_useMessageTypes = false;
 	cpe_envMapVer = 2; cpe_blockDefsExtVer = 2; cpe_customModelsVer = 2;
 	cpe_needD3Fix = false; cpe_extEntityPos = false; cpe_twoWayPing = false; 
-	cpe_extTextures = false; cpe_fastMap = false; cpe_extBlocks = false;
-	Game_UseCPEBlocks = false; cpe_blockPerms = false;
+	cpe_pluginMessages = false; cpe_extTextures = false; cpe_fastMap = false;
+	cpe_extBlocks = false; Game_UseCPEBlocks = false; cpe_blockPerms = false;
 	if (!Game_UseCPE) return;
 
 	Net_Set(OPCODE_EXT_INFO, CPE_ExtInfo, 67);
@@ -1572,14 +1626,17 @@ static void CPE_Reset(void) {
 	Net_Set(OPCODE_DEFINE_MODEL, CPE_DefineModel, 116);
 	Net_Set(OPCODE_DEFINE_MODEL_PART, CPE_DefineModelPart, 104);
 	Net_Set(OPCODE_UNDEFINE_MODEL, CPE_UndefineModel, 2);
+	Net_Set(OPCODE_PLUGIN_MESSAGE, CPE_PluginMessage, 66);
+	Net_Set(OPCODE_ENTITY_TELEPORT_EXT, CPE_ExtEntityTeleport, 11);
 }
 
-static void CPE_Tick(void) {
+static cc_uint8* CPE_Tick(cc_uint8* data) {
 	cpe_pingTicks++;
 	if (cpe_pingTicks >= 20 && cpe_twoWayPing) {
-		CPE_WriteTwoWayPing(false, Ping_NextPingId());
+		data = CPE_WriteTwoWayPing(data, false, Ping_NextPingId());
 		cpe_pingTicks = 0;
 	}
+	return data;
 }
 
 
@@ -1589,7 +1646,7 @@ static void CPE_Tick(void) {
 static void BlockDefs_OnBlockUpdated(BlockID block, cc_bool didBlockLight) {
 	if (!World.Loaded) return;
 	/* Need to refresh lighting when a block's light blocking state changes */
-	if (Blocks.BlocksLight[block] != didBlockLight) Lighting_Refresh();
+	if (Blocks.BlocksLight[block] != didBlockLight) Lighting.Refresh();
 }
 
 static TextureLoc BlockDefs_Tex(cc_uint8** ptr) {
@@ -1619,7 +1676,7 @@ static BlockID BlockDefs_DefineBlockCommonStart(cc_uint8** ptr, cc_bool uniqueSi
 	
 	name = UNSAFE_GetString(data); data += STRING_SIZE;
 	Block_SetName(block, &name);
-	Block_SetCollide(block, *data++);
+	Blocks.Collide[block] = *data++;
 
 	speedLog2 = (*data++ - 128) / 64.0f;
 	#define LOG_2 0.693147180559945
@@ -1659,7 +1716,6 @@ static void BlockDefs_DefineBlockCommonEnd(cc_uint8* data, cc_uint8 shape, Block
 
 	Blocks.FogDensity[block] = data[1] == 0 ? 0.0f : (data[1] + 1) / 128.0f;
 	Blocks.FogCol[block]     = PackedCol_Make(data[2], data[3], data[4], 255);
-	Block_DefineCustom(block);
 }
 
 static void BlockDefs_DefineBlock(cc_uint8* data) {
@@ -1671,8 +1727,7 @@ static void BlockDefs_DefineBlock(cc_uint8* data) {
 	}
 
 	BlockDefs_DefineBlockCommonEnd(data, shape, block);
-	/* Update sprite BoundingBox if necessary */
-	if (Blocks.Draw[block] == DRAW_SPRITE) Block_RecalculateBB(block);
+	Block_DefineCustom(block, true);
 }
 
 static void BlockDefs_UndefineBlock(cc_uint8* data) {
@@ -1682,17 +1737,8 @@ static void BlockDefs_UndefineBlock(cc_uint8* data) {
 	ReadBlock(data, block);
 	didBlockLight = Blocks.BlocksLight[block];
 
-	Block_ResetProps(block);
+	Block_UndefineCustom(block);
 	BlockDefs_OnBlockUpdated(block, didBlockLight);
-	Block_UpdateCulling(block);
-
-	Inventory_Remove(block);
-	if (block < BLOCK_CPE_COUNT) { Inventory_AddDefault(block); }
-
-	Block_SetCustomDefined(block, false);
-	Event_RaiseVoid(&BlockEvents.BlockDefChanged);
-	/* Update sprite BoundingBox if necessary */
-	if (Blocks.Draw[block] == DRAW_SPRITE) Block_RecalculateBB(block);
 }
 
 static void BlockDefs_DefineBlockExt(cc_uint8* data) {
@@ -1710,6 +1756,7 @@ static void BlockDefs_DefineBlockExt(cc_uint8* data) {
 	Blocks.MinBB[block] = minBB;
 	Blocks.MaxBB[block] = maxBB;
 	BlockDefs_DefineBlockCommonEnd(data, 1, block);
+	Block_DefineCustom(block, false);
 }
 
 static void BlockDefs_Reset(void) {
@@ -1731,9 +1778,16 @@ static void Protocol_Reset(void) {
 }
 
 void Protocol_Tick(void) {
-	Classic_Tick();
-	CPE_Tick();
+	cc_uint8 tmp[256];
+	cc_uint8* data = tmp;
+
+	data = Classic_Tick(data);
+	data = CPE_Tick(data);
 	WoM_Tick();
+
+	/* Have any packets been written? */
+	if (data == tmp) return;
+	Server.SendData(tmp, (cc_uint32)(data - tmp));
 }
 
 static void OnInit(void) {

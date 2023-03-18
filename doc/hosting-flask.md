@@ -1,4 +1,6 @@
-The website will be structured like so:
+The page provides a complete example for how to integrate the webclient into a simple website
+
+The example website will be structured like so:
 
 ```
 websrv.py
@@ -70,17 +72,6 @@ if __name__ == "__main__":
   </div>
 </div>
 <script type='text/javascript'>
-  // need to load IndexedDB before running the game
-  function preloadIndexedDB() {
-    addRunDependency('load-idb');
-    FS.mkdir('/classicube');
-    FS.mount(IDBFS, {}, '/classicube');
-    FS.syncfs(true, function(err) {
-        if (err) window.cc_idbErr = err;
-        removeRunDependency('load-idb');
-    })
-  }
-
   function resizeGameCanvas() {
     var cc_canv = $('canvas#canvas');
     var dpi = window.devicePixelRatio;
@@ -96,20 +87,20 @@ if __name__ == "__main__":
     if (canv_w % 2) { canv_w = canv_w - 1; }
 
 {% if mobile_mode %}
-    var screen_h = window.outerHeight || window.innerHeight;
-    canv_h = Math.min(canv_h, screen_h);
+    var screen_h = Math.min(window.innerHeight, window.outerHeight || window.innerHeight);
+    canv_h = screen_h;
 {% endif %}
      cc_canv[0].width  = canv_w * dpi;
      cc_canv[0].height = canv_h * dpi;
   }
 
   var Module = {
-    preRun: [ preloadIndexedDB, resizeGameCanvas ],
+    preRun: [ resizeGameCanvas ],
     postRun: [],
     arguments: {{game_args|safe}},
     print: function(text) {
-        if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
-        console.log(text);
+      if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+      console.log(text);
     },
     printErr: function(text) {
       if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
@@ -117,9 +108,9 @@ if __name__ == "__main__":
     },
     canvas: (function() { return document.getElementById('canvas'); })(),
     setStatus: function(text) {
-                    console.log(text);
-                    document.getElementById('logmsg').innerHTML = text;
-            },
+      console.log(text);
+      document.getElementById('logmsg').innerHTML = text;
+    },
     totalDependencies: 0,
     monitorRunDependencies: function(left) {
       this.totalDependencies = Math.max(this.totalDependencies, left);
@@ -142,7 +133,7 @@ if __name__ == "__main__":
 ```
 
 #### static/classisphere.js
-Download `cs.classicube.net/c_client/latest/ClassiCube.js` for this
+Download `cs.classicube.net/client/latest/ClassiCube.js` for this
 
 #### static/default.zip
 Download `classicube.net/static/default.zip` for this

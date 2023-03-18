@@ -4,8 +4,9 @@
 #include "BlockID.h"
 #include "Constants.h"
 #include "Entity.h"
+#include "Inventory.h"
 /* Contains all 2D widget implementations.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+   Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 struct FontDesc;
 
@@ -71,6 +72,10 @@ struct HotbarWidget {
 	float scrollAcc, scale;
 	cc_bool altHandled;
 	struct Texture ellipsisTex;
+#ifdef CC_BUILD_TOUCH
+	int touchId[HOTBAR_MAX_INDEX];
+	double touchTime[HOTBAR_MAX_INDEX];
+#endif
 };
 /* Resets state of the given hotbar widget to default. */
 CC_NOINLINE void HotbarWidget_Create(struct HotbarWidget* w);
@@ -82,18 +87,17 @@ struct TableWidget {
 	int blocksCount, blocksPerRow;
 	int rowsTotal, rowsVisible;
 	int lastCreatedIndex;
-	struct FontDesc* font;
 	int selectedIndex, cellSizeX, cellSizeY;
-	float selBlockExpand;
+	float normBlockSize, selBlockSize;
 	GfxResourceID vb;
 	cc_bool pendingClose;
 	float scale;
 
 	BlockID blocks[BLOCK_COUNT];
 	struct ScrollbarWidget scroll;
-	struct Texture descTex;
 	int lastX, lastY, paddingX;
-	int paddingTopY, paddingMaxY;
+	int paddingL, paddingR, paddingT, paddingB;
+	void (*UpdateTitle)(BlockID block);
 };
 
 CC_NOINLINE void TableWidget_Create(struct TableWidget* w);
@@ -102,7 +106,6 @@ CC_NOINLINE void TableWidget_Create(struct TableWidget* w);
 CC_NOINLINE void TableWidget_SetBlockTo(struct TableWidget* w, BlockID block);
 CC_NOINLINE void TableWidget_RecreateBlocks(struct TableWidget* w);
 CC_NOINLINE void TableWidget_OnInventoryChanged(struct TableWidget* w);
-CC_NOINLINE void TableWidget_MakeDescTex(struct TableWidget* w, BlockID block);
 CC_NOINLINE void TableWidget_Recreate(struct TableWidget* w);
 
 
@@ -199,6 +202,9 @@ struct TextInputWidget {
 	int minWidth, minHeight;
 	struct MenuInputDesc desc;
 	char _textBuffer[INPUTWIDGET_LEN];
+	/* variables for on-screen keyboard */
+	const char* onscreenPlaceholder;
+	int onscreenType;
 };
 #define MENUINPUTWIDGET_MAX 8
 
@@ -221,7 +227,6 @@ CC_NOINLINE void ChatInputWidget_SetFont(struct ChatInputWidget* w, struct FontD
 
 /* Retrieves the text for the i'th line in the group */
 typedef cc_string (*TextGroupWidget_Get)(int i);
-#define TEXTGROUPWIDGET_MAX_LINES 30
 #define TEXTGROUPWIDGET_LEN (STRING_SIZE + (STRING_SIZE / 2))
 
 /* A group of text labels. */
@@ -230,7 +235,7 @@ struct TextGroupWidget {
 	int lines, defaultHeight;
 	struct FontDesc* font;
 	/* Whether a line has zero height when that line has no text in it. */
-	cc_bool collapsible[TEXTGROUPWIDGET_MAX_LINES];
+	cc_bool collapsible[GUI_MAX_CHATLINES];
 	cc_bool underlineUrls;
 	struct Texture* textures;
 	TextGroupWidget_Get GetLine;
@@ -276,7 +281,7 @@ struct SpecialInputWidget {
 	int titleHeight;
 	struct SpecialInputTab tabs[5];
 	cc_string colString;
-	char _colBuffer[DRAWER2D_MAX_COLS * 4];
+	char _colBuffer[DRAWER2D_MAX_COLORS * 4];
 };
 
 CC_NOINLINE void SpecialInputWidget_Create(struct SpecialInputWidget* w, struct FontDesc* font, struct InputWidget* target);

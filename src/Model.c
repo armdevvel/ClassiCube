@@ -11,7 +11,6 @@
 #include "Drawer.h"
 #include "Block.h"
 #include "Stream.h"
-#include "Funcs.h"
 #include "Options.h"
 
 struct _ModelsData Models;
@@ -97,6 +96,8 @@ void Model_Render(struct Model* model, struct Entity* e) {
 	struct Matrix m;
 	Vec3 pos = e->Position;
 	if (model->bobbing) pos.Y += e->Anim.BobbingModel;
+	/* Original classic offsets models slightly into ground */
+	if (Game_ClassicMode) pos.Y -= 1.5f / 16.0f;
 
 	Model_SetupState(model, e);
 	Gfx_SetVertexFormat(VERTEX_FORMAT_TEXTURED);

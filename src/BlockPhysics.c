@@ -16,7 +16,7 @@
 
 /* Data for a resizable queue, used for liquid physic tick entries. */
 struct TickQueue {
-	cc_uint32* entries;     /* Buffer holding the items in the tick queue */
+	cc_uint32* entries; /* Buffer holding the items in the tick queue */
 	int capacity; /* Max number of elements in the buffer */
 	int mask;     /* capacity - 1, as capacity is always a power of two */
 	int count;    /* Number of used elements */
@@ -46,13 +46,14 @@ static void TickQueue_Resize(struct TickQueue* queue) {
 	if (queue->capacity >= (Int32_MaxValue / 4)) {
 		Chat_AddRaw("&cToo many physics entries, clearing");
 		TickQueue_Clear(queue);
-		return;
 	}
 
 	capacity = queue->capacity * 2;
 	if (capacity < 32) capacity = 32;
 	entries = (cc_uint32*)Mem_Alloc(capacity, 4, "physics tick queue");
 
+	/* Elements must be readjusted to avoid index wrapping issues */
+	/* https://stackoverflow.com/questions/55343683/resizing-of-the-circular-queue-using-dynamic-array */
 	for (i = 0; i < queue->count; i++) {
 		idx = (queue->head + i) & queue->mask;
 		entries[i] = queue->entries[idx];
@@ -267,7 +268,7 @@ static void Physics_HandleDirt(int index, BlockID block) {
 	int x, y, z;
 	World_Unpack(index, x, y, z);
 
-	if (Lighting_IsLit(x, y, z)) {
+	if (Lighting.IsLit(x, y, z)) {
 		Game_UpdateBlock(x, y, z, BLOCK_GRASS);
 	}
 }
@@ -276,7 +277,7 @@ static void Physics_HandleGrass(int index, BlockID block) {
 	int x, y, z;
 	World_Unpack(index, x, y, z);
 
-	if (!Lighting_IsLit(x, y, z)) {
+	if (!Lighting.IsLit(x, y, z)) {
 		Game_UpdateBlock(x, y, z, BLOCK_DIRT);
 	}
 }
@@ -286,7 +287,7 @@ static void Physics_HandleFlower(int index, BlockID block) {
 	int x, y, z;
 	World_Unpack(index, x, y, z);
 
-	if (!Lighting_IsLit(x, y, z)) {
+	if (!Lighting.IsLit(x, y, z)) {
 		Game_UpdateBlock(x, y, z, BLOCK_AIR);
 		Physics_ActivateNeighbours(x, y, z, index);
 		return;
@@ -305,7 +306,7 @@ static void Physics_HandleMushroom(int index, BlockID block) {
 	int x, y, z;
 	World_Unpack(index, x, y, z);
 
-	if (Lighting_IsLit(x, y, z)) {
+	if (Lighting.IsLit(x, y, z)) {
 		Game_UpdateBlock(x, y, z, BLOCK_AIR);
 		Physics_ActivateNeighbours(x, y, z, index);
 		return;
@@ -328,7 +329,7 @@ static void Physics_PropagateLava(int posIndex, int x, int y, int z) {
 	BlockID block = World.Blocks[posIndex];
 	if (block == BLOCK_WATER || block == BLOCK_STILL_WATER) {
 		Game_UpdateBlock(x, y, z, BLOCK_STONE);
-	} else if (Blocks.Collide[block] == COLLIDE_GAS) {
+	} else if (Blocks.Collide[block] == COLLIDE_NONE) {
 		TickQueue_Enqueue(&lavaQ, PHYSICS_LAVA_DELAY | posIndex);
 		Game_UpdateBlock(x, y, z, BLOCK_LAVA);
 	}
@@ -368,7 +369,7 @@ static void Physics_PropagateWater(int posIndex, int x, int y, int z) {
 
 	if (block == BLOCK_LAVA || block == BLOCK_STILL_LAVA) {
 		Game_UpdateBlock(x, y, z, BLOCK_STONE);
-	} else if (Blocks.Collide[block] == COLLIDE_GAS && block != BLOCK_ROPE) {
+	} else if (Blocks.Collide[block] == COLLIDE_NONE && block != BLOCK_ROPE) {
 		/* Sponge check */		
 		for (yy = (y < 2 ? 0 : y - 2); yy <= (y > physics_maxWaterY ? World.MaxY : y + 2); yy++) {
 			for (zz = (z < 2 ? 0 : z - 2); zz <= (z > physics_maxWaterZ ? World.MaxZ : z + 2); zz++) {
@@ -469,11 +470,13 @@ static void Physics_HandleCobblestoneSlab(int index, BlockID block) {
 }
 
 
-static const cc_uint8 blocksTnt[BLOCK_CPE_COUNT] = {
-	0, 1, 0, 0, 1, 0, 0, 1,  1, 1, 1, 1, 0, 0, 1, 1,  1, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0,  0, 1, 1, 1, 1, 1, 0, 0,
-	1, 1, 1, 0, 1, 0, 0, 0,  0, 0, 0, 0, 0, 1, 1, 1,  1, 1,
-};
+/* TODO: should this be moved into a precomputed lookup table, instead of calculating every time? */
+/*  performance difference probably isn't enough to really matter */
+static cc_bool BlocksTNT(BlockID b) {
+	/* NOTE: A bit hacky, but works well enough */
+	return (b >= BLOCK_WATER && b <= BLOCK_STILL_LAVA) || 
+		(Blocks.ExtendedCollide[b] == COLLIDE_SOLID && (Blocks.DigSounds[b] == SOUND_METAL || Blocks.DigSounds[b] == SOUND_STONE));
+}
 
 #define TNT_POWER 4
 #define TNT_POWER_SQUARED (TNT_POWER * TNT_POWER)
@@ -495,7 +498,7 @@ static void Physics_HandleTnt(int index, BlockID block) {
 				index = World_Pack(xx, yy, zz);
 
 				block = World.Blocks[index];
-				if (block < BLOCK_CPE_COUNT && blocksTnt[block]) continue;
+				if (BlocksTNT(block)) continue;
 
 				Game_UpdateBlock(xx, yy, zz, BLOCK_AIR);
 				Physics_ActivateNeighbours(xx, yy, zz, index);

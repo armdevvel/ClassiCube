@@ -26,47 +26,14 @@
 const char* const NameMode_Names[NAME_MODE_COUNT]   = { "None", "Hovered", "All", "AllHovered", "AllUnscaled" };
 const char* const ShadowMode_Names[SHADOW_MODE_COUNT] = { "None", "SnapToBlock", "Circle", "CircleAll" };
 
-/*########################################################################################################################*
-*-----------------------------------------------------LocationUpdate------------------------------------------------------*
-*#########################################################################################################################*/
-float LocationUpdate_Clamp(float degrees) {
-	while (degrees >= 360.0f) degrees -= 360.0f;
-	while (degrees < 0.0f)    degrees += 360.0f;
-	return degrees;
-}
-
-static struct LocationUpdate loc_empty;
-void LocationUpdate_MakeOri(struct LocationUpdate* update, float yaw, float pitch) {
-	*update = loc_empty;
-	update->Flags = LOCATIONUPDATE_PITCH | LOCATIONUPDATE_YAW;
-	update->Pitch = LocationUpdate_Clamp(pitch);
-	update->Yaw   = LocationUpdate_Clamp(yaw);
-}
-
-void LocationUpdate_MakePos(struct LocationUpdate* update, Vec3 pos, cc_bool rel) {
-	*update = loc_empty;
-	update->Flags = LOCATIONUPDATE_POS;
-	update->Pos   = pos;
-	update->RelativePos = rel;
-}
-
-void LocationUpdate_MakePosAndOri(struct LocationUpdate* update, Vec3 pos, float yaw, float pitch, cc_bool rel) {
-	*update = loc_empty;
-	update->Flags = LOCATIONUPDATE_POS | LOCATIONUPDATE_PITCH | LOCATIONUPDATE_YAW;
-	update->Pitch = LocationUpdate_Clamp(pitch);
-	update->Yaw   = LocationUpdate_Clamp(yaw);
-	update->Pos   = pos;
-	update->RelativePos = rel;
-}
-
 
 /*########################################################################################################################*
 *---------------------------------------------------------Entity----------------------------------------------------------*
 *#########################################################################################################################*/
-static PackedCol Entity_GetCol(struct Entity* e) {
+static PackedCol Entity_GetColor(struct Entity* e) {
 	Vec3 eyePos = Entity_GetEyePosition(e);
 	IVec3 pos; IVec3_Floor(&pos, &eyePos);
-	return World_Contains(pos.X, pos.Y, pos.Z) ? Lighting_Col(pos.X, pos.Y, pos.Z) : Env.SunCol;
+	return Lighting.Color(pos.X, pos.Y, pos.Z);
 }
 
 void Entity_Init(struct Entity* e) {
@@ -194,7 +161,7 @@ cc_bool Entity_TouchesAny(struct AABB* bounds, Entity_TouchesCondition condition
 	return false;
 }
 
-static cc_bool IsRopeCollide(BlockID b) { return Blocks.ExtendedCollide[b] == COLLIDE_CLIMB_ROPE; }
+static cc_bool IsRopeCollide(BlockID b) { return Blocks.ExtendedCollide[b] == COLLIDE_CLIMB; }
 cc_bool Entity_TouchesAnyRope(struct Entity* e) {
 	struct AABB bounds; Entity_GetBounds(e, &bounds);
 	bounds.Max.Y += 0.5f / 16.0f;
@@ -202,14 +169,14 @@ cc_bool Entity_TouchesAnyRope(struct Entity* e) {
 }
 
 static const Vec3 entity_liqExpand = { 0.25f/16.0f, 0.0f/16.0f, 0.25f/16.0f };
-static cc_bool IsLavaCollide(BlockID b) { return Blocks.ExtendedCollide[b] == COLLIDE_LIQUID_LAVA; }
+static cc_bool IsLavaCollide(BlockID b) { return Blocks.ExtendedCollide[b] == COLLIDE_LAVA; }
 cc_bool Entity_TouchesAnyLava(struct Entity* e) {
 	struct AABB bounds; Entity_GetBounds(e, &bounds);
 	AABB_Offset(&bounds, &bounds, &entity_liqExpand);
 	return Entity_TouchesAny(&bounds, IsLavaCollide);
 }
 
-static cc_bool IsWaterCollide(BlockID b) { return Blocks.ExtendedCollide[b] == COLLIDE_LIQUID_WATER; }
+static cc_bool IsWaterCollide(BlockID b) { return Blocks.ExtendedCollide[b] == COLLIDE_WATER; }
 cc_bool Entity_TouchesAnyWater(struct Entity* e) {
 	struct AABB bounds; Entity_GetBounds(e, &bounds);
 	AABB_Offset(&bounds, &bounds, &entity_liqExpand);
@@ -226,17 +193,17 @@ cc_bool Entity_TouchesAnyWater(struct Entity* e) {
 
 static void MakeNameTexture(struct Entity* e) {
 	cc_string colorlessName; char colorlessBuffer[STRING_SIZE];
-	BitmapCol shadowCol = BitmapCol_Make(80, 80, 80, 255);
-	BitmapCol origWhiteCol;
+	BitmapCol shadowColor = BitmapCol_Make(80, 80, 80, 255);
+	BitmapCol origWhiteColor;
 
 	struct DrawTextArgs args;
 	struct FontDesc font;
-	struct Bitmap bmp;
+	struct Context2D ctx;
 	int width, height;
 	cc_string name;
 
 	/* Names are always drawn using default.png font */
-	Drawer2D_MakeBitmappedFont(&font, 24, FONT_FLAGS_NONE);
+	Font_MakeBitmapped(&font, 24, FONT_FLAGS_NONE);
 	/* Don't want DPI scaling or padding */
 	font.size = 24; font.height = 24;
 
@@ -252,28 +219,26 @@ static void MakeNameTexture(struct Entity* e) {
 		width  += NAME_OFFSET; 
 		height = Drawer2D_TextHeight(&args) + NAME_OFFSET;
 
-		Bitmap_AllocateClearedPow2(&bmp, width, height);
+		Context2D_Alloc(&ctx, width, height);
 		{
-			origWhiteCol = Drawer2D.Colors['f'];
+			origWhiteColor = Drawer2D.Colors['f'];
 
-			Drawer2D.Colors['f'] = shadowCol;
-			Drawer2D_WithoutCols(&colorlessName, &name);
+			Drawer2D.Colors['f'] = shadowColor;
+			Drawer2D_WithoutColors(&colorlessName, &name);
 			args.text = colorlessName;
-			Drawer2D_DrawText(&bmp, &args, NAME_OFFSET, NAME_OFFSET);
+			Context2D_DrawText(&ctx, &args, NAME_OFFSET, NAME_OFFSET);
 
-			Drawer2D.Colors['f'] = origWhiteCol;
+			Drawer2D.Colors['f'] = origWhiteColor;
 			args.text = name;
-			Drawer2D_DrawText(&bmp, &args, 0, 0);
+			Context2D_DrawText(&ctx, &args, 0, 0);
 		}
-		Drawer2D_MakeTexture(&e->NameTex, &bmp, width, height);
-		Mem_Free(bmp.scan0);
+		Context2D_MakeTexture(&e->NameTex, &ctx);
+		Context2D_Free(&ctx);
 	}
 }
 
 static void DrawName(struct Entity* e) {
 	struct VertexTextured vertices[4];
-	PackedCol col = PACKEDCOL_WHITE;
-
 	struct Model* model;
 	struct Matrix mat;
 	Vec3 pos;
@@ -298,7 +263,7 @@ static void DrawName(struct Entity* e) {
 		size.X *= scale * 0.2f; size.Y *= scale * 0.2f;
 	}
 
-	Particle_DoRender(&size, &pos, &e->NameTex.uv, col, vertices);
+	Particle_DoRender(&size, &pos, &e->NameTex.uv, PACKEDCOL_WHITE, vertices);
 	Gfx_SetVertexFormat(VERTEX_FORMAT_TEXTURED);
 	Gfx_UpdateDynamicVb_IndexedTris(Gfx_texVb, vertices, 4);
 }
@@ -398,7 +363,7 @@ static void Entity_ClearHat(struct Bitmap* bmp, cc_uint8 skinType) {
 		BitmapCol* row = Bitmap_GetRow(bmp, y) + sizeX;
 		for (x = 0; x < sizeX; x++) {
 			BitmapCol c = row[x];
-			if (c == BITMAPCOL_WHITE || c == BITMAPCOL_BLACK) row[x] = 0;
+			if (c == BITMAPCOLOR_WHITE || c == BITMAPCOLOR_BLACK) row[x] = 0;
 		}
 	}
 }
@@ -445,7 +410,7 @@ static cc_result ApplySkin(struct Entity* e, struct Bitmap* bmp, struct Stream* 
 		Chat_Add1("&cSkin %s is too large", skin);
 	} else {
 		if (e->Model->usesHumanSkin) Entity_ClearHat(bmp, e->SkinType);
-		Gfx_RecreateTexture(&e->TextureId, bmp, true, false);
+		Gfx_RecreateTexture(&e->TextureId, bmp, TEXTURE_FLAG_MANAGED, false);
 		Entity_SetSkinAll(e, false);
 	}
 	return 0;
@@ -470,6 +435,7 @@ static void Entity_CheckSkin(struct Entity* e) {
 	struct Stream mem;
 	struct Bitmap bmp;
 	cc_string skin;
+	cc_uint8 flags;
 	cc_result res;
 
 	/* Don't check skin if don't have to */
@@ -479,8 +445,10 @@ static void Entity_CheckSkin(struct Entity* e) {
 
 	if (!e->SkinFetchState) {
 		first = Entity_FirstOtherWithSameSkinAndFetchedSkin(e);
+		flags = e == &LocalPlayer_Instance.Base ? HTTP_FLAG_NOCACHE : 0;
+
 		if (!first) {
-			e->_skinReqID     = Http_AsyncGetSkin(&skin);
+			e->_skinReqID     = Http_AsyncGetSkin(&skin, flags);
 			e->SkinFetchState = SKIN_FETCH_DOWNLOADING;
 		} else {
 			Entity_CopySkin(e, first);
@@ -490,15 +458,18 @@ static void Entity_CheckSkin(struct Entity* e) {
 	}
 
 	if (!Http_GetResult(e->_skinReqID, &item)) return;
-	if (!item.success) { Entity_SetSkinAll(e, true); return; }
 
-	Stream_ReadonlyMemory(&mem, item.data, item.size);
-	if ((res = ApplySkin(e, &bmp, &mem, &skin))) {
-		LogInvalidSkin(res, &skin, item.data, item.size);
+	if (!item.success) { 
+		Entity_SetSkinAll(e, true);
+	} else {
+		Stream_ReadonlyMemory(&mem, item.data, item.size);
+
+		if ((res = ApplySkin(e, &bmp, &mem, &skin))) {
+			LogInvalidSkin(res, &skin, item.data, item.size);
+		}
+		Mem_Free(bmp.scan0);
 	}
-
-	Mem_Free(bmp.scan0);
-	Mem_Free(item.data);
+	HttpRequest_Free(&item);
 }
 
 /* Returns true if no other entities are sharing this skin texture */
@@ -533,6 +504,17 @@ void Entity_SetSkin(struct Entity* e, const cc_string* skin) {
 	String_CopyToRawArray(e->SkinRaw, &tmp);
 }
 
+void Entity_LerpAngles(struct Entity* e, float t) {
+	struct EntityLocation* prev = &e->prev;
+	struct EntityLocation* next = &e->next;
+
+	e->Pitch = Math_LerpAngle(prev->pitch, next->pitch, t);
+	e->Yaw   = Math_LerpAngle(prev->yaw,   next->yaw,   t);
+	e->RotX  = Math_LerpAngle(prev->rotX,  next->rotX,  t);
+	e->RotY  = Math_LerpAngle(prev->rotY,  next->rotY,  t);
+	e->RotZ  = Math_LerpAngle(prev->rotZ,  next->rotZ,  t);
+}
+
 
 /*########################################################################################################################*
 *--------------------------------------------------------Entities---------------------------------------------------------*
@@ -550,14 +532,12 @@ void Entities_Tick(struct ScheduledTask* task) {
 
 void Entities_RenderModels(double delta, float t) {
 	int i;
-	Gfx_SetTexturing(true);
 	Gfx_SetAlphaTest(true);
 	
 	for (i = 0; i < ENTITIES_MAX_COUNT; i++) {
 		if (!Entities.List[i]) continue;
 		Entities.List[i]->VTABLE->RenderModel(Entities.List[i], delta, t);
 	}
-	Gfx_SetTexturing(false);
 	Gfx_SetAlphaTest(false);
 }
 	
@@ -571,7 +551,6 @@ void Entities_RenderNames(void) {
 	entities_closestId = Entities_GetClosest(&p->Base);
 	if (!p->Hacks.CanSeeAllNames || Entities.NamesMode != NAME_MODE_ALL) return;
 
-	Gfx_SetTexturing(true);
 	Gfx_SetAlphaTest(true);
 	hadFog = Gfx_GetFog();
 	if (hadFog) Gfx_SetFog(false);
@@ -583,7 +562,6 @@ void Entities_RenderNames(void) {
 		}
 	}
 
-	Gfx_SetTexturing(false);
 	Gfx_SetAlphaTest(false);
 	if (hadFog) Gfx_SetFog(true);
 }
@@ -597,7 +575,6 @@ void Entities_RenderHoveredNames(void) {
 	allNames = !(Entities.NamesMode == NAME_MODE_HOVERED || Entities.NamesMode == NAME_MODE_ALL) 
 		&& p->Hacks.CanSeeAllNames;
 
-	Gfx_SetTexturing(true);
 	Gfx_SetAlphaTest(true);
 	Gfx_SetDepthTest(false);
 	hadFog = Gfx_GetFog();
@@ -610,7 +587,6 @@ void Entities_RenderHoveredNames(void) {
 		}
 	}
 
-	Gfx_SetTexturing(false);
 	Gfx_SetAlphaTest(false);
 	Gfx_SetDepthTest(true);
 	if (hadFog) Gfx_SetFog(true);
@@ -647,6 +623,12 @@ void Entities_Remove(EntityID id) {
 	Event_RaiseInt(&EntityEvents.Removed, id);
 	Entities.List[id]->VTABLE->Despawn(Entities.List[id]);
 	Entities.List[id] = NULL;
+
+	/* TODO: Move to EntityEvents.Removed callback instead */
+	if (TabList_EntityLinked_Get(id)) {
+		TabList_Remove(id);
+		TabList_EntityLinked_Reset(id);
+	}
 }
 
 EntityID Entities_GetClosest(struct Entity* src) {
@@ -678,7 +660,6 @@ void Entities_DrawShadows(void) {
 	Gfx_SetAlphaArgBlend(true);
 	Gfx_SetDepthWrite(false);
 	Gfx_SetAlphaBlending(true);
-	Gfx_SetTexturing(true);
 
 	Gfx_SetVertexFormat(VERTEX_FORMAT_TEXTURED);
 	ShadowComponent_Draw(Entities.List[ENTITIES_SELF_ID]);
@@ -693,7 +674,6 @@ void Entities_DrawShadows(void) {
 	Gfx_SetAlphaArgBlend(false);
 	Gfx_SetDepthWrite(true);
 	Gfx_SetAlphaBlending(false);
-	Gfx_SetTexturing(false);
 }
 
 
@@ -725,10 +705,16 @@ void TabList_Remove(EntityID id) {
 	Event_RaiseInt(&TabListEvents.Removed, id);
 }
 
-void TabList_Set(EntityID id, const cc_string* player, const cc_string* list, const cc_string* group, cc_uint8 rank) {
+void TabList_Set(EntityID id, const cc_string* player_, const cc_string* list, const cc_string* group, cc_uint8 rank) {
 	cc_string oldPlayer, oldList, oldGroup;
 	cc_uint8 oldRank;
 	struct Event_Int* events;
+
+	/* Player name shouldn't have colour codes */
+	/*  (intended for e.g. tab autocomplete) */
+	cc_string player; char playerBuffer[STRING_SIZE];
+	String_InitArray(player, playerBuffer);
+	String_AppendColorless(&player, player_);
 	
 	if (TabList.NameOffsets[id]) {
 		oldPlayer = TabList_UNSAFE_GetPlayer(id);
@@ -736,8 +722,8 @@ void TabList_Set(EntityID id, const cc_string* player, const cc_string* list, co
 		oldGroup  = TabList_UNSAFE_GetGroup(id);
 		oldRank   = TabList.GroupRanks[id];
 
-		/* Don't redraw the tab list if nothing changed. */
-		if (String_Equals(player, &oldPlayer)  && String_Equals(list, &oldList)
+		/* Don't redraw the tab list if nothing changed */
+		if (String_Equals(&player, &oldPlayer) && String_Equals(list, &oldList)
 			&& String_Equals(group, &oldGroup) && rank == oldRank) return;
 
 		events = &TabListEvents.Changed;
@@ -746,13 +732,17 @@ void TabList_Set(EntityID id, const cc_string* player, const cc_string* list, co
 	}
 	TabList_Delete(id);
 
-	StringsBuffer_Add(&TabList._buffer, player);
+	StringsBuffer_Add(&TabList._buffer, &player);
 	StringsBuffer_Add(&TabList._buffer, list);
 	StringsBuffer_Add(&TabList._buffer, group);
 
 	TabList.NameOffsets[id] = TabList._buffer.count;
 	TabList.GroupRanks[id]  = rank;
 	Event_RaiseInt(events, id);
+}
+
+static void Tablist_Init(void) {
+	TabList_Set(ENTITIES_SELF_ID, &Game_Username, &Game_Username, &String_Empty, 0);
 }
 
 static void TabList_Clear(void) {
@@ -762,7 +752,7 @@ static void TabList_Clear(void) {
 }
 
 struct IGameComponent TabList_Component = {
-	NULL,          /* Init  */
+	Tablist_Init,  /* Init  */
 	TabList_Clear, /* Free  */
 	TabList_Clear  /* Reset */
 };
@@ -787,9 +777,9 @@ float LocalPlayer_JumpHeight(void) {
 void LocalPlayer_SetInterpPosition(float t) {
 	struct LocalPlayer* p = &LocalPlayer_Instance;
 	if (!(p->Hacks.WOMStyleHacks && p->Hacks.Noclip)) {
-		Vec3_Lerp(&p->Base.Position, &p->Interp.Prev.Pos, &p->Interp.Next.Pos, t);
+		Vec3_Lerp(&p->Base.Position, &p->Base.prev.pos, &p->Base.next.pos, t);
 	}
-	InterpComp_LerpAngles((struct InterpComp*)(&p->Interp), &p->Base, t);
+	Entity_LerpAngles(&p->Base, t);
 }
 
 static void LocalPlayer_HandleInput(float* xMoving, float* zMoving) {
@@ -840,9 +830,9 @@ static void LocalPlayer_InputUp(void* obj, int key) {
 	LocalPlayer_InputSet(key, false);
 }
 
-static void LocalPlayer_SetLocation(struct Entity* e, struct LocationUpdate* update, cc_bool interpolate) {
+static void LocalPlayer_SetLocation(struct Entity* e, struct LocationUpdate* update) {
 	struct LocalPlayer* p = (struct LocalPlayer*)e;
-	LocalInterpComp_SetLocation(&p->Interp, update, interpolate);
+	LocalInterpComp_SetLocation(&p->Interp, update);
 }
 
 static void LocalPlayer_Tick(struct Entity* e, double delta) {
@@ -857,7 +847,7 @@ static void LocalPlayer_Tick(struct Entity* e, double delta) {
 	p->OldVelocity = e->Velocity;
 	wasOnGround    = e->OnGround;
 
-	LocalInterpComp_AdvanceState(&p->Interp);
+	LocalInterpComp_AdvanceState(&p->Interp, e);
 	LocalPlayer_HandleInput(&xMoving, &zMoving);
 	hacks->Floating = hacks->Noclip || hacks->Flying;
 	if (!hacks->Floating && hacks->CanBePushed) PhysicsComp_DoEntityPush(e);
@@ -874,8 +864,8 @@ static void LocalPlayer_Tick(struct Entity* e, double delta) {
 	/* Fixes high jump, when holding down a movement key, jump, fly, then let go of fly key */
 	if (p->Hacks.Floating) e->Velocity.Y = 0.0f;
 
-	p->Interp.Next.Pos = e->Position; e->Position = p->Interp.Prev.Pos;
-	AnimatedComp_Update(e, p->Interp.Prev.Pos, p->Interp.Next.Pos, delta);
+	e->next.pos = e->Position; e->Position = e->prev.pos;
+	AnimatedComp_Update(e, e->prev.pos, e->next.pos, delta);
 	TiltComp_Update(&p->Tilt, delta);
 
 	Entity_CheckSkin(&p->Base);
@@ -911,7 +901,7 @@ static void LocalPlayer_GetMovement(float* xMoving, float* zMoving) {
 }
 
 static const struct EntityVTABLE localPlayer_VTABLE = {
-	LocalPlayer_Tick,        Player_Despawn,         LocalPlayer_SetLocation, Entity_GetCol,
+	LocalPlayer_Tick,        Player_Despawn,         LocalPlayer_SetLocation, Entity_GetColor,
 	LocalPlayer_RenderModel, LocalPlayer_RenderName
 };
 static void LocalPlayer_Init(void) {
@@ -1006,11 +996,17 @@ static void LocalPlayer_DoRespawn(void) {
 		}
 	}
 
+	/* Adjust the position to be slightly above the ground, so that */
+	/*  it's obvious to the player that they are being respawned */
 	spawn.Y += 2.0f/16.0f;
-	LocationUpdate_MakePosAndOri(&update, spawn, p->SpawnYaw, p->SpawnPitch, false);
-	p->Base.VTABLE->SetLocation(&p->Base, &update, false);
-	Vec3_Set(p->Base.Velocity, 0,0,0);
 
+	update.flags = LU_HAS_POS | LU_HAS_YAW | LU_HAS_PITCH;
+	update.pos   = spawn;
+	update.yaw   = p->SpawnYaw;
+	update.pitch = p->SpawnPitch;
+	p->Base.VTABLE->SetLocation(&p->Base, &update);
+
+	Vec3_Set(p->Base.Velocity, 0,0,0);
 	/* Update onGround, otherwise if 'respawn' then 'space' is pressed, you still jump into the air if onGround was true before */
 	Entity_GetBounds(&p->Base, &bb);
 	bb.Min.Y -= 0.01f; bb.Max.Y = bb.Min.Y;
@@ -1114,10 +1110,24 @@ void LocalPlayer_MoveToSpawn(void) {
 	struct LocalPlayer* p = &LocalPlayer_Instance;
 	struct LocationUpdate update;
 
-	LocationUpdate_MakePosAndOri(&update, p->Spawn, p->SpawnYaw, p->SpawnPitch, false);
-	p->Base.VTABLE->SetLocation(&p->Base, &update, false);
+	update.flags = LU_HAS_POS | LU_HAS_YAW | LU_HAS_PITCH;
+	update.pos   = p->Spawn;
+	update.yaw   = p->SpawnYaw;
+	update.pitch = p->SpawnPitch;
+
+	p->Base.VTABLE->SetLocation(&p->Base, &update);
 	/* TODO: This needs to be before new map... */
 	Camera.CurrentPos = Camera.Active->GetPosition(0.0f);
+}
+
+void LocalPlayer_CalcDefaultSpawn(void) {
+	struct LocalPlayer* p = &LocalPlayer_Instance;
+	float x = (World.Width  / 2) + 0.5f; 
+	float z = (World.Length / 2) + 0.5f;
+
+	p->Spawn      = Respawn_FindSpawnPosition(x, z, p->Base.Size);
+	p->SpawnYaw   = 0.0f;
+	p->SpawnPitch = 0.0f;
 }
 
 
@@ -1126,33 +1136,32 @@ void LocalPlayer_MoveToSpawn(void) {
 *#########################################################################################################################*/
 struct NetPlayer NetPlayers_List[ENTITIES_SELF_ID];
 
-static void NetPlayer_SetLocation(struct Entity* e, struct LocationUpdate* update, cc_bool interpolate) {
+static void NetPlayer_SetLocation(struct Entity* e, struct LocationUpdate* update) {
 	struct NetPlayer* p = (struct NetPlayer*)e;
-	NetInterpComp_SetLocation(&p->Interp, update, interpolate);
+	NetInterpComp_SetLocation(&p->Interp, update, e);
 }
 
 static void NetPlayer_Tick(struct Entity* e, double delta) {
 	struct NetPlayer* p = (struct NetPlayer*)e;
+	NetInterpComp_AdvanceState(&p->Interp, e);
+
 	Entity_CheckSkin(e);
-	NetInterpComp_AdvanceState(&p->Interp);
-	AnimatedComp_Update(e, p->Interp.Prev.Pos, p->Interp.Next.Pos, delta);
+	AnimatedComp_Update(e, e->prev.pos, e->next.pos, delta);
 }
 
 static void NetPlayer_RenderModel(struct Entity* e, double deltaTime, float t) {
-	struct NetPlayer* p = (struct NetPlayer*)e;
-	Vec3_Lerp(&e->Position, &p->Interp.Prev.Pos, &p->Interp.Next.Pos, t);
-	InterpComp_LerpAngles((struct InterpComp*)(&p->Interp), e, t);
+	Vec3_Lerp(&e->Position, &e->prev.pos, &e->next.pos, t);
+	Entity_LerpAngles(e, t);
 
 	AnimatedComp_GetCurrent(e, t);
-	p->Base.ShouldRender = Model_ShouldRender(e);
-	if (p->Base.ShouldRender) Model_Render(e->Model, e);
+	e->ShouldRender = Model_ShouldRender(e);
+	if (e->ShouldRender) Model_Render(e->Model, e);
 }
 
 static void NetPlayer_RenderName(struct Entity* e) {
-	struct NetPlayer* p = (struct NetPlayer*)e;
 	float distance;
 	int threshold;
-	if (!p->Base.ShouldRender) return;
+	if (!e->ShouldRender) return;
 
 	distance  = Model_RenderDistance(e);
 	threshold = Entities.NamesMode == NAME_MODE_ALL_UNSCALED ? 8192 * 8192 : 32 * 32;
@@ -1160,7 +1169,7 @@ static void NetPlayer_RenderName(struct Entity* e) {
 }
 
 static const struct EntityVTABLE netPlayer_VTABLE = {
-	NetPlayer_Tick,        Player_Despawn,       NetPlayer_SetLocation, Entity_GetCol,
+	NetPlayer_Tick,        Player_Despawn,       NetPlayer_SetLocation, Entity_GetColor,
 	NetPlayer_RenderModel, NetPlayer_RenderName
 };
 void NetPlayer_Init(struct NetPlayer* p) {

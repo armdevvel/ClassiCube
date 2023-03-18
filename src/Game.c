@@ -36,11 +36,9 @@
 #include "Protocol.h"
 #include "Picking.h"
 #include "Animations.h"
-#ifdef CC_BUILD_WEB
-#include <emscripten.h>
-#endif
 
 struct _GameData Game;
+cc_uint64 Game_FrameStart;
 cc_bool Game_UseCPEBlocks;
 
 struct RayTracer Game_SelectedPos;
@@ -56,8 +54,9 @@ cc_bool Game_AllowServerTextures;
 
 cc_bool Game_ViewBobbing, Game_HideGui, Game_DefaultZipMissing;
 cc_bool Game_BreakableLiquids, Game_ScreenshotRequested;
+struct GameVersion Game_Version;
 
-static char usernameBuffer[FILENAME_SIZE];
+static char usernameBuffer[STRING_SIZE];
 static char mppassBuffer[STRING_SIZE];
 cc_string Game_Username = String_FromArray(usernameBuffer);
 cc_string Game_Mppass   = String_FromArray(mppassBuffer);
@@ -143,6 +142,17 @@ void Game_CycleViewDistance(void) {
 	}
 }
 
+cc_bool Game_ReduceVRAM(void) {
+	if (Game_UserViewDistance <= 16) return false;
+	Game_UserViewDistance /= 2;
+	Game_UserViewDistance = max(16, Game_UserViewDistance);
+
+	MapRenderer_Refresh();
+	Game_SetViewDistance(Game_UserViewDistance);
+	Chat_AddRaw("&cOut of VRAM! Halving view distance..");
+	return true;
+}
+
 
 void Game_SetViewDistance(int distance) {
 	distance = min(distance, Game_MaxViewDistance);
@@ -181,7 +191,7 @@ void Game_UpdateBlock(int x, int y, int z, BlockID block) {
 	if (Weather_Heightmap) {
 		EnvRenderer_OnBlockChanged(x, y, z, old, block);
 	}
-	Lighting_OnBlockChanged(x, y, z, old, block);
+	Lighting.OnBlockChanged(x, y, z, old, block);
 	MapRenderer_OnBlockChanged(x, y, z, block);
 }
 
@@ -208,7 +218,7 @@ cc_bool Game_UpdateTexture(GfxResourceID* texId, struct Stream* src, const cc_st
 	success = !res && Game_ValidateBitmap(file, &bmp);
 	if (success) {
 		if (skinType) { *skinType = Utils_CalcSkinType(&bmp); }
-		Gfx_RecreateTexture(texId, &bmp, true, false);
+		Gfx_RecreateTexture(texId, &bmp, TEXTURE_FLAG_MANAGED, false);
 	}
 
 	Mem_Free(bmp.scan0);
@@ -265,14 +275,20 @@ static void HandleOnNewMapLoaded(void* obj) {
 	}
 }
 
-static void HandleLowVRAMDetected(void* obj) {
-	if (Game_UserViewDistance <= 16) Logger_Abort("Out of video memory!");
-	Game_UserViewDistance /= 2;
-	Game_UserViewDistance = max(16, Game_UserViewDistance);
+static void HandleInactiveChanged(void* obj) {
+	if (WindowInfo.Inactive) {
+		Chat_AddOf(&Gfx_LowPerfMessage, MSG_TYPE_EXTRASTATUS_2);
+		Gfx_SetFpsLimit(false, 1000 / 1.0f);
+	} else {
+		Chat_AddOf(&String_Empty,       MSG_TYPE_EXTRASTATUS_2);
+		Game_SetFpsLimit(Game_FpsLimit);
+		Chat_AddRaw(LOWPERF_EXIT_MESSAGE);
+	}
 
-	MapRenderer_Refresh();
-	Game_SetViewDistance(Game_UserViewDistance);
-	Chat_AddRaw("&cOut of VRAM! Halving view distance..");
+#ifdef CC_BUILD_WEB
+	extern void emscripten_resume_main_loop(void);
+	emscripten_resume_main_loop();
+#endif
 }
 
 static void Game_WarnFunc(const cc_string* msg) {
@@ -287,7 +303,7 @@ static void LoadOptions(void) {
 	Game_ClassicMode       = Options_GetBool(OPT_CLASSIC_MODE, false);
 	Game_ClassicHacks      = Options_GetBool(OPT_CLASSIC_HACKS, false);
 	Game_AllowCustomBlocks = Options_GetBool(OPT_CUSTOM_BLOCKS, true);
-	Game_UseCPE            = Options_GetBool(OPT_CPE, true);
+	Game_UseCPE            = !Game_ClassicMode && Options_GetBool(OPT_CPE, true);
 	Game_SimpleArmsAnim    = Options_GetBool(OPT_SIMPLE_ARMS_ANIM, false);
 	Game_ViewBobbing       = Options_GetBool(OPT_VIEW_BOBBING, true);
 
@@ -356,13 +372,14 @@ static void Game_Load(void) {
 	Gfx_Create();
 	Logger_WarnFunc = Game_WarnFunc;
 	LoadOptions();
+	GameVersion_Load();
 	Utils_EnsureDirectory("maps");
 
-	Event_Register_(&WorldEvents.NewMap,        NULL, HandleOnNewMap);
-	Event_Register_(&WorldEvents.MapLoaded,     NULL, HandleOnNewMapLoaded);
-	Event_Register_(&GfxEvents.LowVRAMDetected, NULL, HandleLowVRAMDetected);
-	Event_Register_(&WindowEvents.Resized,      NULL, Game_OnResize);
-	Event_Register_(&WindowEvents.Closing,      NULL, Game_Free);
+	Event_Register_(&WorldEvents.NewMap,           NULL, HandleOnNewMap);
+	Event_Register_(&WorldEvents.MapLoaded,        NULL, HandleOnNewMapLoaded);
+	Event_Register_(&WindowEvents.Resized,         NULL, Game_OnResize);
+	Event_Register_(&WindowEvents.Closing,         NULL, Game_Free);
+	Event_Register_(&WindowEvents.InactiveChanged, NULL, HandleInactiveChanged);
 
 	Game_AddComponent(&World_Component);
 	Game_AddComponent(&Textures_Component);
@@ -402,7 +419,7 @@ static void Game_Load(void) {
 	}
 
 	Game_DefaultZipMissing = false;
-	TexturePack_ExtractCurrent(false);
+	TexturePack_ExtractCurrent(true);
 	if (Game_DefaultZipMissing) {
 		Window_ShowDialog("Missing file",
 			"default.zip is missing, try downloading resources first.\n\nThe game will still run, but without any textures");
@@ -433,8 +450,6 @@ static void UpdateViewMatrix(void) {
 
 static void Game_Render3D(double delta, float t) {
 	Vec3 pos;
-
-	EnvRenderer_UpdateFog();
 	if (EnvRenderer_ShouldRenderSkybox()) EnvRenderer_RenderSkybox();
 
 	AxisLinesRenderer_Render();
@@ -511,10 +526,8 @@ void Game_TakeScreenshot(void) {
 
 #ifdef CC_BUILD_WEB
 	extern void interop_TakeScreenshot(const char* path);
-	Platform_EncodeUtf8(str, &filename);
+	String_EncodeUtf8(str, &filename);
 	interop_TakeScreenshot(str);
-#elif CC_BUILD_MINFILES
-	/* no screenshots for these systems */
 #else
 	if (!Utils_EnsureDirectory("screenshots")) return;
 	String_InitArray(path, pathBuffer);
@@ -532,13 +545,8 @@ void Game_TakeScreenshot(void) {
 	if (res) { Logger_SysWarn2(res, "closing", &path); return; }
 	Chat_Add1("&eTaken screenshot as: %s", &filename);
 
-#ifdef CC_BUILD_ANDROID
-	path.length = 0;
-	JavaCall_String_String("shareScreenshot", &filename, &path);
-	if (!path.length) return;
-	
-	Chat_AddRaw("&cError sharing screenshot");
-	Chat_Add1("  &c%s", &path);
+#ifdef CC_BUILD_MOBILE
+	Platform_ShareScreenshot(&filename);
 #endif
 #endif
 }
@@ -578,12 +586,17 @@ static void Game_RenderFrame(double delta) {
 	t = (float)(entTask.accumulator / entTask.interval);
 	LocalPlayer_SetInterpPosition(t);
 
-	Gfx_Clear();
 	Camera.CurrentPos = Camera.Active->GetPosition(t);
+	/* NOTE: EnvRenderer_UpdateFog also also sets clear color */
+	EnvRenderer_UpdateFog();
 	UpdateViewMatrix();
 
+	/* TODO: Not calling Gfx_EndFrame doesn't work with Direct3D9 */
+	if (WindowInfo.Inactive) return;
+	Gfx_Clear();
+
 	Gfx_LoadMatrix(MATRIX_PROJECTION, &Gfx.Projection);
-	Gfx_LoadMatrix(MATRIX_VIEW, &Gfx.View);
+	Gfx_LoadMatrix(MATRIX_VIEW,       &Gfx.View);
 
 	if (!Gui_GetBlocksWorld()) {
 		Game_Render3D(delta, t);
@@ -614,32 +627,30 @@ void Game_Free(void* obj) {
 	Logger_WarnFunc = Logger_DialogWarn;
 	Gfx_Free();
 	Options_SaveIfChanged();
+	Window_DisableRawMouse();
 }
 
 #define Game_DoFrameBody() \
+	render = Stopwatch_Measure();\
 	Window_ProcessEvents();\
 	if (!WindowInfo.Exists) return;\
 	\
-	render = Stopwatch_Measure();\
-	time   = Stopwatch_ElapsedMicroseconds(lastRender, render) / (1000.0 * 1000.0);\
+	delta  = Stopwatch_ElapsedMicroseconds(Game_FrameStart, render) / (1000.0 * 1000.0);\
 	\
-	if (time > 1.0) time = 1.0; /* avoid large delta with suspended process */ \
-	if (time > 0.0) { lastRender = Stopwatch_Measure(); Game_RenderFrame(time); }
+	if (delta > 1.0) delta = 1.0; /* avoid large delta with suspended process */ \
+	if (delta > 0.0) { Game_FrameStart = render; Game_RenderFrame(delta); }
 
 #ifdef CC_BUILD_WEB
-static cc_uint64 lastRender;
-static void Game_DoFrame(void) {
+void Game_DoFrame(void) {
 	cc_uint64 render; 
-	double time;
+	double delta;
 	Game_DoFrameBody()
 }
 
 static void Game_RunLoop(void) {
-	lastRender = Stopwatch_Measure();
-	emscripten_set_main_loop(Game_DoFrame, 0, false);
-	/* The Game_SetFpsLimit call back in Game_Load does nothing because no main loop yet */
-	/*  Now thats there's a main loop, Game_SetFpsLimit will actually do something */
-	Game_SetFpsLimit(Options_GetEnum(OPT_FPS_LIMIT, 0, FpsLimit_Names, FPS_LIMIT_COUNT));
+	Game_FrameStart = Stopwatch_Measure();
+	/* Window_Web.c sets Game_DoFrame as the main loop callback function */
+	/* (i.e. web browser is in charge of calling Game_DoFrame, not us) */
 }
 
 cc_bool Game_ShouldClose(void) {
@@ -655,33 +666,16 @@ cc_bool Game_ShouldClose(void) {
 }
 #else
 static void Game_RunLoop(void) {
-	cc_uint64 lastRender, render; 
-	double time;
-	lastRender = Stopwatch_Measure();
+	cc_uint64 render;
+	double delta;
+
+	Game_FrameStart = Stopwatch_Measure();
 	for (;;) { Game_DoFrameBody() }
 }
 #endif
 
-#ifdef CC_BUILD_ANDROID
-extern cc_bool Window_RemakeSurface(void);
-static cc_bool SwitchToGame() {
-	/* Reset components */
-	Platform_LogConst("undoing components");
-	Drawer2D_Component.Free();
-	//Http_Component.Free();
-	return Window_RemakeSurface();
-}
-#endif
-
 void Game_Run(int width, int height, const cc_string* title) {
-#ifdef CC_BUILD_ANDROID
-	/* Android won't let us change pixel surface to EGL surface */
-	/* So unfortunately have to completely recreate the surface */
-	if (!SwitchToGame()) return;
-	Window_EnterFullscreen();
-#endif
-
-	Window_Create(width, height);
+	Window_Create3D(width, height);
 	Window_SetTitle(title);
 	Window_Show();
 

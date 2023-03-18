@@ -6,7 +6,7 @@
 #include "BlockID.h"
 /* Stores properties and data for blocks.
    Also performs automatic rotation of directional blocks.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+   Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 struct IGameComponent;
 extern struct IGameComponent Blocks_Component;
@@ -30,14 +30,14 @@ enum DrawType {
 
 /* Describes the interaction a block has with a player when they collide with it. */
 enum CollideType {
-	COLLIDE_GAS,          /* No interaction when player collides. */
+	COLLIDE_NONE,         /* No interaction when player collides. */
 	COLLIDE_LIQUID,       /* 'swimming'/'bobbing' interaction when player collides. */
 	COLLIDE_SOLID,        /* Block completely stops the player when they are moving. */
 	COLLIDE_ICE,          /* Block is solid and partially slidable on. */
 	COLLIDE_SLIPPERY_ICE, /* Block is solid and fully slidable on. */
-	COLLIDE_LIQUID_WATER, /* Water style 'swimming'/'bobbing' interaction when player collides. */
-	COLLIDE_LIQUID_LAVA,  /* Lava style 'swimming'/'bobbing' interaction when player collides. */
-	COLLIDE_CLIMB_ROPE    /* Rope/Ladder style climbing interaction when player collides. */
+	COLLIDE_WATER,        /* Water style 'swimming'/'bobbing' interaction when player collides. */
+	COLLIDE_LAVA,         /* Lava style 'swimming'/'bobbing' interaction when player collides. */
+	COLLIDE_CLIMB         /* Rope/Ladder style climbing interaction when player collides. */
 };
 
 CC_VAR extern struct _BlockLists {
@@ -61,8 +61,8 @@ CC_VAR extern struct _BlockLists {
 	/* Can be < 1 to slow player down, or > 1 to speed up. */
 	float SpeedMultiplier[BLOCK_COUNT];
 	/* Bit flags of which faces of this block uses light colour from neighbouring blocks. */
-	/* e.g. a block with Min.X of 0.0 uses light colour at X-1,Y,Z for XMIN face. */
-	/* e.g. a block with Min.X of 0.1 uses light colour at X,Y,Z   for XMIN face. */
+	/*   e.g. a block with Min.X of 0.0 uses light colour at X-1,Y,Z for XMIN face. */
+	/*   e.g. a block with Min.X of 0.1 uses light colour at X,Y,Z   for XMIN face. */
 	cc_uint8 LightOffset[BLOCK_COUNT];
 	/* Draw method used when rendering this block. See DrawType enum. */
 	cc_uint8 Draw[BLOCK_COUNT];
@@ -100,61 +100,51 @@ CC_VAR extern struct _BlockLists {
 	cc_uint8 Hidden[BLOCK_COUNT * BLOCK_COUNT];
 	/* Bit flags of which faces of this block can stretch with greedy meshing. */
 	cc_uint8 CanStretch[BLOCK_COUNT];
+	/* Gravity of particles spawned when this block is broken */
+	float ParticleGravity[BLOCK_COUNT];
 } Blocks;
 
 #define Block_Tint(col, block)\
 if (Blocks.Tinted[block]) col = PackedCol_Tint(col, Blocks.FogCol[block]);
 
-/* Returns whether the given block has been changed from default. */
-cc_bool Block_IsCustomDefined(BlockID block);
-/* Sets whether the given block has been changed from default. */
-void Block_SetCustomDefined(BlockID block, cc_bool defined);
-void Block_DefineCustom(BlockID block);
+/* Most blocks which 'stop' light actually stop the light starting at block below */
+/*  except for e.g. upside down slabs which 'stop' the light at same block level */
+/* The difference can be seen by placing a lower and upper slab block on a wall, */
+/*  and comparing whether the block directly behind them is in shadow or not */
+#define LIGHT_FLAG_SHADES_FROM_BELOW 6
 
-/* Sets the basic and extended collide types of the given block. */
-void Block_SetCollide(BlockID block, cc_uint8 collide);
-/* Sets draw type and updates related state (e.g. FullOpaque) for the given block. */
-void Block_SetDrawType(BlockID block, cc_uint8 draw);
-/* Resets all the properties of the given block to default. */
+/* Returns whether the given block has been changed from default */
+cc_bool Block_IsCustomDefined(BlockID block);
+/* Updates state and raises event after the given block has been defined */
+void Block_DefineCustom(BlockID block, cc_bool checkSprite);
+/* Resets the given block to default */
+void Block_UndefineCustom(BlockID block);
+/* Resets all the properties of the given block to default */
 void Block_ResetProps(BlockID block);
 
-/* Gets the name of the given block. */
-/* NOTE: Name points directly within underlying buffer, you MUST NOT persist this string. */
+/* Gets the name of the given block */
+/* NOTE: Name points directly within underlying buffer, you MUST NOT persist this string */
 CC_API STRING_REF cc_string Block_UNSAFE_GetName(BlockID block);
 /* Sets the name of the given block. */
 void Block_SetName(BlockID block, const cc_string* name);
-/* Finds the ID of the block whose name caselessly matches given name. */
+/* Finds the ID of the block whose name caselessly matches given name */
 CC_API int Block_FindID(const cc_string* name);
-/* Attempts to parse given name as a numerical block ID. */
-/* Falls back to Block_FindID if this fails. */
+/* Attempts to parse given name as a numerical block ID */
+/* Falls back to Block_FindID if this fails */
 CC_API int Block_Parse(const cc_string* name);
 
-/* Calculates render min/max corners of this block. */
-/* Works by slightly offsetting collision min/max corners. */
-void Block_CalcRenderBounds(BlockID block);
-/* Calculates light colour offset for each face of the given block. */
-void Block_CalcLightOffset(BlockID block);
-/* Recalculates bounding boxes of all sprite blocks. */
-void Block_RecalculateAllSpriteBB(void);
-/* Recalculates bounding box of the given sprite block. */
-void Block_RecalculateBB(BlockID block);
-
-/* Sets the textures of the side faces of the given block. */
+/* Sets the textures of the side faces of the given block */
 void Block_SetSide(TextureLoc texLoc, BlockID blockId);
-/* The texture for the given face of the given block. */
+/* The texture for the given face of the given block */
 #define Block_Tex(block, face) Blocks.Textures[(block) * FACE_COUNT + (face)]
 
-cc_bool Block_IsFaceHidden(BlockID block, BlockID other, Face face);
-/* Updates culling data of all blocks. */
-void Block_UpdateAllCulling(void);
-/* Updates culling data just for this block. */
-/* (e.g. whether block can be stretched, visibility with other blocks) */
-void Block_UpdateCulling(BlockID block);
+/* Whether the given face of this block is occluded/hidden */
+#define Block_IsFaceHidden(block, other, face) (Blocks.Hidden[((block) * BLOCK_COUNT) + (other)] & (1 << (face)))
 
-/* Whether blocks can be automatically rotated. */
+/* Whether blocks can be automatically rotated */
 extern cc_bool AutoRotate_Enabled;
-/* Attempts to find the rotated block based on the user's orientation and offset on selected block. */
-/* If no rotated block is found, returns given block. */
+/* Attempts to find the rotated block based on the user's orientation and offset on selected block */
+/* If no rotated block is found, returns given block */
 BlockID AutoRotate_RotateBlock(BlockID block);
 /* Returns non 0 if both blocks belong to the same autorotate group */
 cc_bool AutoRotate_BlocksShareGroup(BlockID block, BlockID blockOther);

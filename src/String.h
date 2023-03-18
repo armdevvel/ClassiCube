@@ -1,11 +1,12 @@
 #ifndef CC_STRING_H
 #define CC_STRING_H
 #include "Core.h"
-/* Implements operations for a string.
-   Also implements conversions betweens strings and numbers.
-   Also implements converting code page 437 indices to/from unicode.
-   Also implements wrapping a single line of text into multiple lines.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+/* 
+Provides various string related operations
+   Also provides conversions betweens strings and numbers
+   Also provides converting code page 437 indices to/from unicode
+   Also provides wrapping a single line of text into multiple lines
+Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 
 #define STRING_INT_CHARS 24
@@ -175,7 +176,7 @@ cc_unichar Convert_CP437ToUnicode(char c);
 /* Converts a unicode codepoint to its code page 437 equivalent, or '?' if no match. */
 char Convert_CodepointToCP437(cc_codepoint cp);
 /* Attempts to convert a unicode codepoint to its code page 437 equivalent. */
-cc_bool Convert_TryCodepointToCP437(cc_codepoint cp, char* c);
+CC_API cc_bool Convert_TryCodepointToCP437(cc_codepoint cp, char* c);
 /* Decodes a unicode codepoint from UTF8, returning number of bytes read. */
 /* Returns 0 if not enough input data to read the character. */
 int Convert_Utf8ToCodepoint(cc_codepoint* cp, const cc_uint8* data, cc_uint32 len);
@@ -192,6 +193,9 @@ void String_AppendUtf8(cc_string* str, const void* data, int numBytes);
 /* Attempts to append all characters from CP-1252 encoded data to the given string. */
 /* Characters not in code page 437 are omitted. */
 void String_DecodeCP1252(cc_string* str, const void* data, int numBytes);
+/* Encodes a string in UTF8 format, also null terminating the string. */
+/* Returns the number of bytes written, excluding trailing NULL terminator. */
+int String_EncodeUtf8(void* data, const cc_string* src);
 
 /* Attempts to convert the given string into an unsigned 8 bit integer. */
 CC_API cc_bool Convert_ParseUInt8(const cc_string*  str, cc_uint8* value);
@@ -226,19 +230,23 @@ struct StringsBuffer {
 	int _lenMask;
 };
 
-/* Sets the number of bits in an entry's flags that are used to store its length. */
+/* Resets counts to 0 and other state to default */
+void StringsBuffer_Init(struct StringsBuffer* buffer);
+/* Sets the number of bits in an entry's flags that are used to store its length */
 /*  (e.g. if bits is 9, then the maximum length of an entry is 2^9-1 = 511) */
 void StringsBuffer_SetLengthBits(struct StringsBuffer* buffer, int bits);
-/* Resets counts to 0, and frees any allocated memory. */
+/* Frees any allocated memory and then called StringsBuffer_Init */
 CC_NOINLINE void StringsBuffer_Clear(struct StringsBuffer* buffer);
-/* UNSAFE: Returns a direct pointer to the i'th string in the given buffer. */
+/* UNSAFE: Returns a direct pointer to the i'th string in the given buffer */
 /* You MUST NOT change the characters of this string. Copy to another string if necessary.*/
 CC_API STRING_REF cc_string StringsBuffer_UNSAFE_Get(struct StringsBuffer* buffer, int i);
 STRING_REF void StringsBuffer_UNSAFE_GetRaw(struct StringsBuffer* buffer, int i, cc_string* dst);
-/* Adds a given string to the end of the given buffer. */
+/* Adds the given string to the end of the given buffer */
 CC_API void StringsBuffer_Add(struct StringsBuffer* buffer, const cc_string* str);
-/* Removes the i'th string from the given buffer, shifting following strings downwards. */
+/* Removes the i'th string from the given buffer, shifting following strings downwards */
 CC_API void StringsBuffer_Remove(struct StringsBuffer* buffer, int index);
+/* Sorts all the entries in the given buffer using String_Compare */
+void StringsBuffer_Sort(struct StringsBuffer* buffer);
 
 /* Performs line wrapping on the given string. */
 /* e.g. "some random tex|t* (| is lineLen) becomes "some random" "text" */

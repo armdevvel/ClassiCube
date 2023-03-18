@@ -1,12 +1,26 @@
 #include "Bitmap.h"
 #include "Platform.h"
-#include "PackedCol.h"
 #include "ExtMath.h"
 #include "Deflate.h"
 #include "Logger.h"
 #include "Stream.h"
 #include "Errors.h"
 #include "Utils.h"
+
+BitmapCol BitmapColor_Offset(BitmapCol color, int rBy, int gBy, int bBy) {
+	int r, g, b;
+	r = BitmapCol_R(color) + rBy; Math_Clamp(r, 0, 255);
+	g = BitmapCol_G(color) + gBy; Math_Clamp(g, 0, 255);
+	b = BitmapCol_B(color) + bBy; Math_Clamp(b, 0, 255);
+	return BitmapColor_RGB(r, g, b);
+}
+
+BitmapCol BitmapColor_Scale(BitmapCol a, float t) {
+	cc_uint8 R = (cc_uint8)(BitmapCol_R(a) * t);
+	cc_uint8 G = (cc_uint8)(BitmapCol_G(a) * t);
+	cc_uint8 B = (cc_uint8)(BitmapCol_B(a) * t);
+	return (a & BITMAPCOLOR_A_MASK) | BitmapColor_R_Bits(R) | BitmapColor_G_Bits(G) | BitmapColor_B_Bits(B);
+}
 
 void Bitmap_UNSAFE_CopyBlock(int srcX, int srcY, int dstX, int dstY, 
 							struct Bitmap* src, struct Bitmap* dst, int size) {
@@ -26,22 +40,6 @@ void Bitmap_Allocate(struct Bitmap* bmp, int width, int height) {
 void Bitmap_TryAllocate(struct Bitmap* bmp, int width, int height) {
 	bmp->width = width; bmp->height = height;
 	bmp->scan0 = (BitmapCol*)Mem_TryAlloc(width * height, 4);
-}
-
-void Bitmap_AllocateClearedPow2(struct Bitmap* bmp, int width, int height) {
-	width  = Math_NextPowOf2(width);
-	height = Math_NextPowOf2(height);
-
-	bmp->width = width; bmp->height = height;
-	bmp->scan0 = (BitmapCol*)Mem_AllocCleared(width * height, 4, "bitmap data");
-}
-
-void Bitmap_TryAllocateClearedPow2(struct Bitmap* bmp, int width, int height) {
-	width  = Math_NextPowOf2(width);
-	height = Math_NextPowOf2(height);
-
-	bmp->width = width; bmp->height = height;
-	bmp->scan0 = (BitmapCol*)Mem_TryAllocCleared(width * height, 4);
 }
 
 void Bitmap_Scale(struct Bitmap* dst, struct Bitmap* src, 
@@ -67,14 +65,13 @@ void Bitmap_Scale(struct Bitmap* dst, struct Bitmap* src,
 /*########################################################################################################################*
 *------------------------------------------------------PNG decoder--------------------------------------------------------*
 *#########################################################################################################################*/
-#define PNG_SIG_SIZE 8
 #define PNG_IHDR_SIZE 13
 #define PNG_PALETTE 256
 #define PNG_FourCC(a, b, c, d) (((cc_uint32)a << 24) | ((cc_uint32)b << 16) | ((cc_uint32)c << 8) | (cc_uint32)d)
 
-enum PngCol {
-	PNG_COL_GRAYSCALE = 0, PNG_COL_RGB = 2, PNG_COL_INDEXED = 3,
-	PNG_COL_GRAYSCALE_A = 4, PNG_COL_RGB_A = 6
+enum PngColor {
+	PNG_COLOR_GRAYSCALE = 0, PNG_COLOR_RGB = 2, PNG_COLOR_INDEXED = 3,
+	PNG_COLOR_GRAYSCALE_A = 4, PNG_COLOR_RGB_A = 6
 };
 
 enum PngFilter {
@@ -272,7 +269,7 @@ static void Png_Expand_RGB_A_16(int width, BitmapCol* palette, cc_uint8* src, Bi
 
 static Png_RowExpander Png_GetExpander(cc_uint8 col, cc_uint8 bitsPerSample) {
 	switch (col) {
-	case PNG_COL_GRAYSCALE:
+	case PNG_COLOR_GRAYSCALE:
 		switch (bitsPerSample) {
 		case 1:  return Png_Expand_GRAYSCALE_1;
 		case 2:  return Png_Expand_GRAYSCALE_2;
@@ -282,14 +279,14 @@ static Png_RowExpander Png_GetExpander(cc_uint8 col, cc_uint8 bitsPerSample) {
 		}
 		return NULL;
 
-	case PNG_COL_RGB:
+	case PNG_COLOR_RGB:
 		switch (bitsPerSample) {
 		case 8:  return Png_Expand_RGB_8;
 		case 16: return Png_Expand_RGB_16;
 		}
 		return NULL;
 
-	case PNG_COL_INDEXED:
+	case PNG_COLOR_INDEXED:
 		switch (bitsPerSample) {
 		case 1: return Png_Expand_INDEXED_1;
 		case 2: return Png_Expand_INDEXED_2;
@@ -298,14 +295,14 @@ static Png_RowExpander Png_GetExpander(cc_uint8 col, cc_uint8 bitsPerSample) {
 		}
 		return NULL;
 
-	case PNG_COL_GRAYSCALE_A:
+	case PNG_COLOR_GRAYSCALE_A:
 		switch (bitsPerSample) {
 		case 8:  return Png_Expand_GRAYSCALE_A_8;
 		case 16: return Png_Expand_GRAYSCALE_A_16;
 		}
 		return NULL;
 
-	case PNG_COL_RGB_A:
+	case PNG_COLOR_RGB_A:
 		switch (bitsPerSample) {
 		case 8:  return Png_Expand_RGB_A_8;
 		case 16: return Png_Expand_RGB_A_16;
@@ -317,13 +314,13 @@ static Png_RowExpander Png_GetExpander(cc_uint8 col, cc_uint8 bitsPerSample) {
 
 /* Sets alpha to 0 for any pixels in the bitmap whose RGB is same as col */
 static void ComputeTransparency(struct Bitmap* bmp, BitmapCol col) {
-	BitmapCol trnsRGB = col & BITMAPCOL_RGB_MASK;
+	BitmapCol trnsRGB = col & BITMAPCOLOR_RGB_MASK;
 	int x, y, width = bmp->width, height = bmp->height;
 
 	for (y = 0; y < height; y++) {
 		BitmapCol* row = Bitmap_GetRow(bmp, y);
 		for (x = 0; x < width; x++) {
-			BitmapCol rgb = row[x] & BITMAPCOL_RGB_MASK;
+			BitmapCol rgb = row[x] & BITMAPCOLOR_RGB_MASK;
 			row[x] = (rgb == trnsRGB) ? trnsRGB : row[x];
 		}
 	}
@@ -368,8 +365,8 @@ cc_result Png_Decode(struct Bitmap* bmp, struct Stream* stream) {
 	if (res) return res;
 	if (!Png_Detect(tmp, PNG_SIG_SIZE)) return PNG_ERR_INVALID_SIG;
 
-	trnsCol = BITMAPCOL_BLACK;
-	for (i = 0; i < PNG_PALETTE; i++) { palette[i] = BITMAPCOL_BLACK; }
+	trnsCol = BITMAPCOLOR_BLACK;
+	for (i = 0; i < PNG_PALETTE; i++) { palette[i] = BITMAPCOLOR_BLACK; }
 
 	Inflate_MakeStream2(&compStream, &inflate, stream);
 	ZLibHeader_Init(&zlibHeader);
@@ -419,32 +416,32 @@ cc_result Png_Decode(struct Bitmap* bmp, struct Stream* stream) {
 			if (res) return res;
 
 			for (i = 0; i < dataSize; i += 3) {
-				palette[i / 3] &= BITMAPCOL_A_MASK; /* set RGB to 0 */
-				palette[i / 3] |= tmp[i    ] << BITMAPCOL_R_SHIFT;
-				palette[i / 3] |= tmp[i + 1] << BITMAPCOL_G_SHIFT;
-				palette[i / 3] |= tmp[i + 2] << BITMAPCOL_B_SHIFT;
+				palette[i / 3] &= BITMAPCOLOR_A_MASK; /* set RGB to 0 */
+				palette[i / 3] |= tmp[i    ] << BITMAPCOLOR_R_SHIFT;
+				palette[i / 3] |= tmp[i + 1] << BITMAPCOLOR_G_SHIFT;
+				palette[i / 3] |= tmp[i + 2] << BITMAPCOLOR_B_SHIFT;
 			}
 		} break;
 
 		case PNG_FourCC('t','R','N','S'): {
-			if (col == PNG_COL_GRAYSCALE) {
+			if (col == PNG_COLOR_GRAYSCALE) {
 				if (dataSize != 2) return PNG_ERR_TRANS_COUNT;
 				res = Stream_Read(stream, tmp, dataSize);
 				if (res) return res;
 
 				/* RGB is 16 bits big endian, ignore least significant 8 bits */
 				trnsCol = BitmapCol_Make(tmp[0], tmp[0], tmp[0], 0);
-			} else if (col == PNG_COL_INDEXED) {
+			} else if (col == PNG_COLOR_INDEXED) {
 				if (dataSize > PNG_PALETTE) return PNG_ERR_TRANS_COUNT;
 				res = Stream_Read(stream, tmp, dataSize);
 				if (res) return res;
 
 				/* set alpha component of palette */
 				for (i = 0; i < dataSize; i++) {
-					palette[i] &= BITMAPCOL_RGB_MASK; /* set A to 0 */
-					palette[i] |= tmp[i] << PACKEDCOL_A_SHIFT;
+					palette[i] &= BITMAPCOLOR_RGB_MASK; /* set A to 0 */
+					palette[i] |= tmp[i] << BITMAPCOLOR_A_SHIFT;
 				}
-			} else if (col == PNG_COL_RGB) {
+			} else if (col == PNG_COLOR_RGB) {
 				if (dataSize != 6) return PNG_ERR_TRANS_COUNT;
 				res = Stream_Read(stream, tmp, dataSize);
 				if (res) return res;
@@ -626,9 +623,9 @@ static void Png_EncodeRow(const cc_uint8* cur, const cc_uint8* prior, cc_uint8* 
 	best[0] = bestFilter;
 }
 
-static int Png_SelectRow(struct Bitmap* bmp, int y) { return y; }
+static BitmapCol* DefaultGetRow(struct Bitmap* bmp, int y) { return Bitmap_GetRow(bmp, y); }
 cc_result Png_Encode(struct Bitmap* bmp, struct Stream* stream, 
-					Png_RowSelector selectRow, cc_bool alpha) {
+					Png_RowGetter getRow, cc_bool alpha) {
 	cc_uint8 tmp[32];
 	/* TODO: This should be * 4 for alpha (should switch to mem_alloc though) */
 	cc_uint8 prevLine[PNG_MAX_DIMS * 3], curLine[PNG_MAX_DIMS * 3];
@@ -643,7 +640,7 @@ cc_result Png_Encode(struct Bitmap* bmp, struct Stream* stream,
 	/* stream may not start at 0 (e.g. when making default.zip) */
 	if ((res = stream->Position(stream, &stream_beg))) return res;
 
-	if (!selectRow) selectRow = Png_SelectRow;
+	if (!getRow) getRow = DefaultGetRow;
 	if ((res = Stream_Write(stream, pngSig, PNG_SIG_SIZE))) return res;
 	Stream_WriteonlyCrc32(&chunk, stream);
 
@@ -654,7 +651,7 @@ cc_result Png_Encode(struct Bitmap* bmp, struct Stream* stream,
 		Stream_SetU32_BE(&tmp[8],  bmp->width);
 		Stream_SetU32_BE(&tmp[12], bmp->height);
 		tmp[16] = 8;           /* bits per sample */
-		tmp[17] = alpha ? PNG_COL_RGB_A : PNG_COL_RGB;
+		tmp[17] = alpha ? PNG_COLOR_RGB_A : PNG_COLOR_RGB;
 		tmp[18] = 0;           /* DEFLATE compression method */
 		tmp[19] = 0;           /* ADAPTIVE filter method */
 		tmp[20] = 0;           /* Not using interlacing */
@@ -672,10 +669,9 @@ cc_result Png_Encode(struct Bitmap* bmp, struct Stream* stream,
 	Mem_Set(prevLine, 0, lineSize);
 
 	for (y = 0; y < bmp->height; y++) {
-		int row = selectRow(bmp, y);
-		BitmapCol* src = Bitmap_GetRow(bmp, row);
-		cc_uint8* prev  = (y & 1) == 0 ? prevLine : curLine;
-		cc_uint8* cur   = (y & 1) == 0 ? curLine  : prevLine;
+		BitmapCol* src = getRow(bmp, y);
+		cc_uint8* prev = (y & 1) == 0 ? prevLine : curLine;
+		cc_uint8* cur  = (y & 1) == 0 ? curLine  : prevLine;
 
 		Png_MakeRow(src, cur, lineSize, alpha);
 		Png_EncodeRow(cur, prev, bestLine, lineSize, alpha);

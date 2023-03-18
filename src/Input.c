@@ -48,7 +48,8 @@ static struct TouchPointer {
 	TimeMS start;
 } touches[INPUT_MAX_POINTERS];
 int Pointers_Count;
-cc_bool Input_TapPlace = true, Input_HoldPlace = false;
+int Input_TapMode  = INPUT_MODE_PLACE;
+int Input_HoldMode = INPUT_MODE_DELETE;
 cc_bool Input_TouchMode;
 
 static void MouseStatePress(int button);
@@ -137,7 +138,12 @@ static void CheckBlockTap(int i) {
 	if (DateTime_CurrentUTC_MS() > touches[i].start + 250) return;
 	if (touches[i].type != TOUCH_TYPE_ALL) return;
 
-	btn = Input_TapPlace ? MOUSE_RIGHT : MOUSE_LEFT;
+	if (Input_TapMode == INPUT_MODE_PLACE) {
+		btn = MOUSE_RIGHT;
+	} else if (Input_TapMode == INPUT_MODE_DELETE) {
+		btn = MOUSE_LEFT;
+	} else { return; }
+
 	pressed = input_buttonsDown[btn];
 	MouseStatePress(btn);
 
@@ -184,7 +190,7 @@ cc_bool Input_Pressed[INPUT_COUNT];
 "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T",\
 "U", "V", "W", "X", "Y", "Z"
 
-const char* const Input_Names[INPUT_COUNT] = {
+const char* const Input_StorageNames[INPUT_COUNT] = {
 	"None",
 	Key_Function_Names,
 	"Tilde", "Minus", "Plus", "BracketLeft", "BracketRight", "Slash",
@@ -206,27 +212,27 @@ const char* const Input_Names[INPUT_COUNT] = {
 	"XButton1", "XButton2", "LeftMouse", "RightMouse", "MiddleMouse"
 };
 
-/* TODO: Should this only be shown in GUI? not saved to disc? */
-/*const char* const Input_Names[INPUT_COUNT] = {
+const char* const Input_DisplayNames[INPUT_COUNT] = {
 	"NONE",
 	Key_Function_Names,
-	"GRAVE", "MINUS", "PLUS", "LBRACKET", "RBRACKET",
-	"SEMICOLON", "APOSTROPHE", "COMMA", "PERIOD", "SLASH", "BACKSLASH",
+	"GRAVE", "MINUS", "PLUS", "LBRACKET", "RBRACKET", "SLASH",
+	"SEMICOLON", "APOSTROPHE", "COMMA", "PERIOD", "BACKSLASH",
 	"LSHIFT", "RSHIFT", "LCONTROL", "RCONTROL",
-	"LMENU", "RMENU", "LWIN", "RWIN", "MENU",
+	"LALT", "RALT", "LWIN", "RWIN",
 	"UP", "DOWN", "LEFT", "RIGHT",
 	"0", "1", "2", "3", "4",
 	"5", "6", "7", "8", "9",
-	"RETURN", "ESCAPE", "SPACE", "TAB", "BACK", "INSERT",
-	"DELETE", "PRIOR", "DOWN", "HOME", "END", "CAPITAL",
+	"INSERT", "DELETE", "HOME", "END", "PRIOR", "DOWN",
+	"MENU",
+	Key_Ascii_Names,
+	"RETURN", "ESCAPE", "SPACE", "BACK", "TAB", "CAPITAL",
 	"SCROLL", "PRINT", "PAUSE", "NUMLOCK",
 	"NUMPAD0", "NUMPAD1", "NUMPAD2", "NUMPAD3", "NUMPAD4",
 	"NUMPAD5", "NUMPAD6", "NUMPAD7", "NUMPAD8", "NUMPAD9",
 	"DIVIDE", "MULTIPLY", "SUBTRACT",
 	"ADD", "DECIMAL", "NUMPADENTER",
-	Key_Ascii_Names,
-	"XBUTTON1", "XBUTTON2, "MMOUSE"
-};*/
+	"XBUTTON1", "XBUTTON2", "LMOUSE", "RMOUSE", "MMOUSE"
+};
 
 void Input_SetPressed(int key) {
 	cc_bool wasPressed = Input_Pressed[key];
@@ -346,7 +352,7 @@ static void KeyBind_Load(void) {
 		String_Format1(&name, "key-%c", keybindNames[i]);
 		name.buffer[name.length] = '\0';
 
-		mapping = Options_GetEnum(name.buffer, KeyBind_Defaults[i], Input_Names, INPUT_COUNT);
+		mapping = Options_GetEnum(name.buffer, KeyBind_Defaults[i], Input_StorageNames, INPUT_COUNT);
 		if (mapping != KEY_ESCAPE) KeyBinds[i] = mapping;
 	}
 }
@@ -357,7 +363,7 @@ void KeyBind_Set(KeyBind binding, int key) {
 	String_InitArray(name, nameBuffer);
 
 	String_Format1(&name, "key-%c", keybindNames[binding]);
-	value = String_FromReadonly(Input_Names[key]);
+	value = String_FromReadonly(Input_StorageNames[key]);
 	Options_SetString(&name, &value);
 	KeyBinds[binding] = key;
 }
@@ -401,12 +407,12 @@ static void Hotkeys_QuickSort(int left, int right) {
 
 	while (left < right) {
 		int i = left, j = right;
-		cc_uint8 pivot = keys[(i + j) >> 1].Flags;
+		cc_uint8 pivot = keys[(i + j) >> 1].mods;
 
 		/* partition the list */
 		while (i <= j) {
-			while (pivot < keys[i].Flags) i++;
-			while (pivot > keys[j].Flags) j--;
+			while (pivot < keys[i].mods) i++;
+			while (pivot > keys[j].mods) j--;
 			QuickSort_Swap_Maybe();
 		}
 		/* recurse into the smaller subset */
@@ -414,12 +420,12 @@ static void Hotkeys_QuickSort(int left, int right) {
 	}
 }
 
-static void Hotkeys_AddNewHotkey(int trigger, cc_uint8 modifiers, const cc_string* text, cc_bool more) {
+static void Hotkeys_AddNewHotkey(int trigger, cc_uint8 modifiers, const cc_string* text, cc_uint8 flags) {
 	struct HotkeyData hKey;
-	hKey.Trigger = trigger;
-	hKey.Flags   = modifiers;
-	hKey.TextIndex = HotkeysText.count;
-	hKey.StaysOpen = more;
+	hKey.trigger = trigger;
+	hKey.mods    = modifiers;
+	hKey.textIndex = HotkeysText.count;
+	hKey.flags   = flags;
 
 	if (HotkeysText.count == HOTKEYS_MAX_COUNT) {
 		Chat_AddRaw("&cCannot define more than 256 hotkeys");
@@ -437,26 +443,26 @@ static void Hotkeys_RemoveText(int index) {
 	 int i;
 
 	for (i = 0; i < HotkeysText.count; i++, hKey++) {
-		if (hKey->TextIndex >= index) hKey->TextIndex--;
+		if (hKey->textIndex >= index) hKey->textIndex--;
 	}
 	StringsBuffer_Remove(&HotkeysText, index);
 }
 
 
-void Hotkeys_Add(int trigger, cc_uint8 modifiers, const cc_string* text, cc_bool more) {
+void Hotkeys_Add(int trigger, cc_uint8 modifiers, const cc_string* text, cc_uint8 flags) {
 	struct HotkeyData* hk = HotkeysList;
 	int i;
 
 	for (i = 0; i < HotkeysText.count; i++, hk++) {		
-		if (hk->Trigger != trigger || hk->Flags != modifiers) continue;
-		Hotkeys_RemoveText(hk->TextIndex);
+		if (hk->trigger != trigger || hk->mods != modifiers) continue;
+		Hotkeys_RemoveText(hk->textIndex);
 
-		hk->StaysOpen = more;
-		hk->TextIndex = HotkeysText.count;
+		hk->flags     = flags;
+		hk->textIndex = HotkeysText.count;
 		StringsBuffer_Add(&HotkeysText, text);
 		return;
 	}
-	Hotkeys_AddNewHotkey(trigger, modifiers, text, more);
+	Hotkeys_AddNewHotkey(trigger, modifiers, text, flags);
 }
 
 cc_bool Hotkeys_Remove(int trigger, cc_uint8 modifiers) {
@@ -464,8 +470,8 @@ cc_bool Hotkeys_Remove(int trigger, cc_uint8 modifiers) {
 	int i, j;
 
 	for (i = 0; i < HotkeysText.count; i++, hk++) {
-		if (hk->Trigger != trigger || hk->Flags != modifiers) continue;
-		Hotkeys_RemoveText(hk->TextIndex);
+		if (hk->trigger != trigger || hk->mods != modifiers) continue;
+		Hotkeys_RemoveText(hk->textIndex);
 
 		for (j = i; j < HotkeysText.count; j++) {
 			HotkeysList[j] = HotkeysList[j + 1];
@@ -486,7 +492,7 @@ int Hotkeys_FindPartial(int key) {
 	for (i = 0; i < HotkeysText.count; i++) {
 		hk = HotkeysList[i];
 		/* e.g. if holding Ctrl and Shift, a hotkey with only Ctrl modifiers matches */
-		if ((hk.Flags & modifiers) == hk.Flags && hk.Trigger == key) return i;
+		if ((hk.mods & modifiers) == hk.mods && hk.trigger == key) return i;
 	}
 	return -1;
 }
@@ -504,7 +510,7 @@ static void StoredHotkey_Parse(cc_string* key, cc_string* value) {
 	if (!String_UNSAFE_Separate(key,   '&', &strKey,  &strMods)) return;
 	if (!String_UNSAFE_Separate(value, '&', &strMore, &strText)) return;
 	
-	trigger = Utils_ParseEnum(&strKey, KEY_NONE, Input_Names, INPUT_COUNT);
+	trigger = Utils_ParseEnum(&strKey, KEY_NONE, Input_StorageNames, INPUT_COUNT);
 	if (trigger == KEY_NONE) return; 
 	if (!Convert_ParseUInt8(&strMods, &modifiers)) return;
 	if (!Convert_ParseBool(&strMore,  &more))      return;
@@ -529,7 +535,7 @@ void StoredHotkeys_Load(int trigger, cc_uint8 modifiers) {
 	cc_string key, value; char keyBuffer[STRING_SIZE];
 	String_InitArray(key, keyBuffer);
 
-	String_Format2(&key, "hotkey-%c&%b", Input_Names[trigger], &modifiers);
+	String_Format2(&key, "hotkey-%c&%b", Input_StorageNames[trigger], &modifiers);
 	key.buffer[key.length] = '\0'; /* TODO: Avoid this null terminator */
 
 	Options_UNSAFE_Get(key.buffer, &value);
@@ -540,7 +546,7 @@ void StoredHotkeys_Remove(int trigger, cc_uint8 modifiers) {
 	cc_string key; char keyBuffer[STRING_SIZE];
 	String_InitArray(key, keyBuffer);
 
-	String_Format2(&key, "hotkey-%c&%b", Input_Names[trigger], &modifiers);
+	String_Format2(&key, "hotkey-%c&%b", Input_StorageNames[trigger], &modifiers);
 	Options_SetString(&key, NULL);
 }
 
@@ -550,7 +556,7 @@ void StoredHotkeys_Add(int trigger, cc_uint8 modifiers, cc_bool moreInput, const
 	String_InitArray(key, keyBuffer);
 	String_InitArray(value, valueBuffer);
 
-	String_Format2(&key, "hotkey-%c&%b", Input_Names[trigger], &modifiers);
+	String_Format2(&key, "hotkey-%c&%b", Input_StorageNames[trigger], &modifiers);
 	String_Format2(&value, "%t&%s", &moreInput, text);
 	Options_SetString(&key, &value);
 }
@@ -646,8 +652,9 @@ static cc_bool PushbackPlace(struct AABB* blockBB) {
 		return false;
 	}
 
-	LocationUpdate_MakePos(&update, pos, false);
-	p->VTABLE->SetLocation(p, &update, false);
+	update.flags = LU_HAS_POS | LU_POS_ABSOLUTE_INSTANT;
+	update.pos   = pos;
+	p->VTABLE->SetLocation(p, &update);
 	return true;
 }
 
@@ -684,7 +691,7 @@ static cc_bool CheckIsFree(BlockID block) {
 	IVec3_ToVec3(&pos, &Game_SelectedPos.TranslatedPos);
 	if (IntersectsOthers(pos, block)) return false;
 	
-	nextPos = LocalPlayer_Instance.Interp.Next.Pos;
+	nextPos = LocalPlayer_Instance.Base.next.pos;
 	Vec3_Add(&blockBB.Min, &pos, &Blocks.MinBB[block]);
 	Vec3_Add(&blockBB.Max, &pos, &Blocks.MaxBB[block]);
 
@@ -703,8 +710,10 @@ static cc_bool CheckIsFree(BlockID block) {
 
 	/* Push player upwards when they are jumping and trying to place a block underneath them */
 	nextPos.Y = pos.Y + Blocks.MaxBB[block].Y + ENTITY_ADJUSTMENT;
-	LocationUpdate_MakePos(&update, nextPos, false);
-	p->VTABLE->SetLocation(p, &update, false);
+
+	update.flags = LU_HAS_POS | LU_POS_ABSOLUTE_INSTANT;
+	update.pos   = nextPos;
+	p->VTABLE->SetLocation(p, &update);
 	return true;
 }
 
@@ -739,7 +748,7 @@ void InputHandler_PlaceBlock(void) {
 	if (Blocks.Draw[block] == DRAW_GAS && Blocks.Draw[old] != DRAW_GAS) return;
 
 	/* undeletable gas blocks can't be replaced with other blocks */
-	if (Blocks.Collide[old] == COLLIDE_GAS && !Blocks.CanDelete[old]) return;
+	if (Blocks.Collide[old] == COLLIDE_NONE && !Blocks.CanDelete[old]) return;
 
 	if (!CheckIsFree(block)) return;
 
@@ -774,8 +783,8 @@ void InputHandler_Tick(void) {
 	
 #ifdef CC_BUILD_TOUCH
 	if (Input_TouchMode) {
-		left   = !Input_HoldPlace && AnyBlockTouches();
-		right  = Input_HoldPlace  && AnyBlockTouches();
+		left   = (Input_HoldMode == INPUT_MODE_DELETE) && AnyBlockTouches();
+		right  = (Input_HoldMode == INPUT_MODE_PLACE)  && AnyBlockTouches();
 		middle = false;
 	}
 #endif
@@ -814,9 +823,9 @@ static cc_bool InputHandler_IsShutdown(int key) {
 static void InputHandler_Toggle(int key, cc_bool* target, const char* enableMsg, const char* disableMsg) {
 	*target = !(*target);
 	if (*target) {
-		Chat_Add2("%c. &ePress &a%c &eto disable.",   enableMsg,  Input_Names[key]);
+		Chat_Add2("%c. &ePress &a%c &eto disable.",   enableMsg,  Input_StorageNames[key]);
 	} else {
-		Chat_Add2("%c. &ePress &a%c &eto re-enable.", disableMsg, Input_Names[key]);
+		Chat_Add2("%c. &ePress &a%c &eto re-enable.", disableMsg, Input_StorageNames[key]);
 	}
 }
 
@@ -930,9 +939,9 @@ static void HandleHotkeyDown(int key) {
 
 	if (i == -1) return;
 	hkey = &HotkeysList[i];
-	text = StringsBuffer_UNSAFE_Get(&HotkeysText, hkey->TextIndex);
+	text = StringsBuffer_UNSAFE_Get(&HotkeysText, hkey->textIndex);
 
-	if (!hkey->StaysOpen) {
+	if (!(hkey->flags & HOTKEY_FLAG_STAYS_OPEN)) {
 		Chat_Send(&text, false);
 	} else if (!Gui.InputGrab) {
 		ChatScreen_OpenInput(&text);
@@ -1119,6 +1128,7 @@ static void OnInit(void) {
 
 static void OnFree(void) {
 	ClearTouches();
+	HotkeysText.count = 0;
 }
 
 struct IGameComponent Input_Component = {

@@ -18,21 +18,15 @@
 #include "Funcs.h"
 #include "Logger.h"
 #include "Options.h"
+#include "LBackend.h"
+#include "PackedCol.h"
 
-static struct LScreen* activeScreen;
-Rect2D Launcher_Dirty;
-struct Bitmap Launcher_Framebuffer;
-cc_bool Launcher_ClassicBackground;
-struct FontDesc Launcher_TitleFont, Launcher_TextFont, Launcher_HintFont;
-
-static cc_bool pendingRedraw;
-static struct FontDesc logoFont;
-static int titleX, titleY;
-
+struct LScreen* Launcher_Active;
 cc_bool Launcher_ShouldExit, Launcher_ShouldUpdate;
 static char hashBuffer[STRING_SIZE], userBuffer[STRING_SIZE];
 cc_string Launcher_AutoHash = String_FromArray(hashBuffer);
 cc_string Launcher_Username = String_FromArray(userBuffer);
+cc_bool Launcher_ShowEmptyServers;
 
 static cc_bool useBitmappedFont, hasBitmappedFont;
 static struct Bitmap dirtBmp, stoneBmp;
@@ -40,29 +34,32 @@ static struct Bitmap dirtBmp, stoneBmp;
 
 static void CloseActiveScreen(void) {
 	Window_CloseKeyboard();
-	if (activeScreen) activeScreen->Free(activeScreen);
+	if (!Launcher_Active) return;
+	
+	Launcher_Active->Free(Launcher_Active);
+	LBackend_CloseScreen(Launcher_Active);
+	Launcher_Active = NULL;
 }
 
 void Launcher_SetScreen(struct LScreen* screen) {
-	int i;
 	CloseActiveScreen();
-	activeScreen = screen;
+	Launcher_Active = screen;
 	if (!screen->numWidgets) screen->Init(screen);
 
 	screen->Show(screen);
 	screen->Layout(screen);
-	/* for hovering over active button etc */
-	for (i = 0; i < Pointers_Count; i++) {
-		screen->MouseMove(screen, i);
-	}
 
-	Launcher_Redraw();
+	LBackend_SetScreen(screen);
+	LBackend_Redraw();
 }
 
-void Launcher_DisplayHttpError(cc_result res, int status, const char* action, cc_string* dst) {
+void Launcher_DisplayHttpError(struct HttpRequest* req, const char* action, cc_string* dst) {
+	cc_result res = req->result;
+	int status    = req->statusCode;
+
 	if (res) {
 		/* Non HTTP error - this is not good */
-		Logger_Warn(res, action, Http_DescribeError);
+		Http_LogError(action, req);
 		String_Format2(dst, "&cError %i when %c", &res, action);
 	} else if (status != 200) {
 		String_Format2(dst, "&c%i error when %c", &status, action);
@@ -71,20 +68,14 @@ void Launcher_DisplayHttpError(cc_result res, int status, const char* action, cc
 	}
 }
 
-static CC_NOINLINE void InitFramebuffer(void) {
-	Launcher_Framebuffer.width  = max(WindowInfo.Width,  1);
-	Launcher_Framebuffer.height = max(WindowInfo.Height, 1);
-	Window_AllocFramebuffer(&Launcher_Framebuffer);
-}
-
 
 /*########################################################################################################################*
 *--------------------------------------------------------Starter/Updater--------------------------------------------------*
 *#########################################################################################################################*/
 static cc_uint64 lastJoin;
 cc_bool Launcher_StartGame(const cc_string* user, const cc_string* mppass, const cc_string* ip, const cc_string* port, const cc_string* server) {
-	cc_string args; char argsBuffer[512];
-	TimeMS now;
+	cc_string args[4]; int numArgs;
+	cc_uint64 now;
 	cc_result res;
 	
 	now = Stopwatch_Measure();
@@ -93,6 +84,7 @@ cc_bool Launcher_StartGame(const cc_string* user, const cc_string* mppass, const
 
 	/* Save resume info */
 	if (server->length) {
+		Options_PauseSaving();
 		Options_Set(ROPT_SERVER, server);
 		Options_Set(ROPT_USER,   user);
 		Options_Set(ROPT_IP,     ip);
@@ -103,17 +95,22 @@ cc_bool Launcher_StartGame(const cc_string* user, const cc_string* mppass, const
 	/* Otherwise can get 'file already in use' errors on startup */
 	Options_SaveIfChanged();
 
-	String_InitArray(args, argsBuffer);
-	String_AppendString(&args, user);
-	if (mppass->length) String_Format3(&args, " %s %s %s", mppass, ip, port);
+	args[0] = *user;
+	numArgs = 1;
+	if (mppass->length) {
+		args[1] = *mppass;
+		args[2] = *ip;
+		args[3] = *port;
+		numArgs = 4;
+	}
 
-	res = Process_StartGame(&args);
+	res = Process_StartGame2(args, numArgs);
 	if (res) { Logger_SysWarn(res, "starting game"); return false; }
 
-#ifdef CC_BUILD_ANDROID
+#ifdef CC_BUILD_MOBILE
 	Launcher_ShouldExit = true;
 #else
-	Launcher_ShouldExit = Options_GetBool(OPT_AUTO_CLOSE_LAUNCHER, false);
+	Launcher_ShouldExit = Options_GetBool(LOPT_AUTO_CLOSE, false);
 #endif
 	return true;
 }
@@ -126,9 +123,13 @@ CC_NOINLINE static void StartFromInfo(struct ServerInfo* info) {
 	Launcher_StartGame(&Launcher_Username, &info->mppass, &info->ip, &port, &info->name);
 }
 
+static void ConnectToServerError(struct HttpRequest* req) {
+	cc_string logMsg = String_Init(NULL, 0, 0);
+	Launcher_DisplayHttpError(req, "fetching server info", &logMsg);
+}
+
 cc_bool Launcher_ConnectToServer(const cc_string* hash) {
 	struct ServerInfo* info;
-	cc_string logMsg;
 	int i;
 	if (!hash->length) return false;
 
@@ -145,7 +146,7 @@ cc_bool Launcher_ConnectToServer(const cc_string* hash) {
 	FetchServerTask_Run(hash);
 
 	while (!FetchServerTask.Base.completed) { 
-		LWebTask_Tick(&FetchServerTask.Base);
+		LWebTask_Tick(&FetchServerTask.Base, ConnectToServerError);
 		Thread_Sleep(10); 
 	}
 
@@ -154,9 +155,6 @@ cc_bool Launcher_ConnectToServer(const cc_string* hash) {
 		return true;
 	} else if (FetchServerTask.Base.success) {
 		Window_ShowDialog("Failed to connect", "No server has that hash");
-	} else {
-		logMsg = String_Init(NULL, 0, 0);
-		LWebTask_DisplayError(&FetchServerTask.Base, "fetching server info", &logMsg);
 	}
 	return false;
 }
@@ -165,19 +163,12 @@ cc_bool Launcher_ConnectToServer(const cc_string* hash) {
 /*########################################################################################################################*
 *---------------------------------------------------------Event handler---------------------------------------------------*
 *#########################################################################################################################*/
-static void ReqeustRedraw(void* obj) {
-	/* We may get multiple Redraw events in short timespan */
-	/* So we just request a redraw at next launcher tick */
-	pendingRedraw  = true;
-	Launcher_MarkAllDirty();
-}
-
 static void OnResize(void* obj) {
-	Window_FreeFramebuffer(&Launcher_Framebuffer);
-	InitFramebuffer();
+	LBackend_FreeFramebuffer();
+	LBackend_InitFramebuffer();
 
-	if (activeScreen) activeScreen->Layout(activeScreen);
-	Launcher_Redraw();
+	if (Launcher_Active) Launcher_Active->Layout(Launcher_Active);
+	LBackend_Redraw();
 }
 
 static cc_bool IsShutdown(int key) {
@@ -193,92 +184,43 @@ static cc_bool IsShutdown(int key) {
 
 static void OnInputDown(void* obj, int key, cc_bool was) {
 	if (IsShutdown(key)) Launcher_ShouldExit = true;
-	activeScreen->KeyDown(activeScreen, key, was);
-}
-
-static void OnKeyPress(void* obj, int c) {
-	activeScreen->KeyPress(activeScreen, c);
-}
-
-static void OnTextChanged(void* obj, const cc_string* str) {
-	activeScreen->TextChanged(activeScreen, str);
+	Launcher_Active->KeyDown(Launcher_Active, key, was);
 }
 
 static void OnMouseWheel(void* obj, float delta) {
-	activeScreen->MouseWheel(activeScreen, delta);
-}
-
-static void OnPointerDown(void* obj, int idx) {
-	activeScreen->MouseDown(activeScreen, idx);
-}
-
-static void OnPointerUp(void* obj, int idx) {
-	activeScreen->MouseUp(activeScreen, idx);
-}
-
-static void OnPointerMove(void* obj, int idx) {
-	if (!activeScreen) return;
-	activeScreen->MouseMove(activeScreen, idx);
+	Launcher_Active->MouseWheel(Launcher_Active, delta);
 }
 
 
 /*########################################################################################################################*
 *-----------------------------------------------------------Main body-----------------------------------------------------*
 *#########################################################################################################################*/
-static void Launcher_Display(void) {
-	if (pendingRedraw) {
-		Launcher_Redraw();
-		pendingRedraw = false;
-	}
-
-	Window_DrawFramebuffer(Launcher_Dirty);
-	Launcher_Dirty.X = 0; Launcher_Dirty.Width   = 0;
-	Launcher_Dirty.Y = 0; Launcher_Dirty.Height  = 0;
-}
-
 static void Launcher_Init(void) {
 	Event_Register_(&WindowEvents.Resized,      NULL, OnResize);
 	Event_Register_(&WindowEvents.StateChanged, NULL, OnResize);
-	Event_Register_(&WindowEvents.Redraw,       NULL, ReqeustRedraw);
 
-	Event_Register_(&InputEvents.Down,        NULL, OnInputDown);
-	Event_Register_(&InputEvents.Press,       NULL, OnKeyPress);
-	Event_Register_(&InputEvents.Wheel,       NULL, OnMouseWheel);
-	Event_Register_(&InputEvents.TextChanged, NULL, OnTextChanged);
+	Event_Register_(&InputEvents.Down,          NULL, OnInputDown);
+	Event_Register_(&InputEvents.Wheel,         NULL, OnMouseWheel);
 
-	Event_Register_(&PointerEvents.Down,  NULL, OnPointerDown);
-	Event_Register_(&PointerEvents.Up,    NULL, OnPointerUp);
-	Event_Register_(&PointerEvents.Moved, NULL, OnPointerMove);
-
-	Drawer2D_MakeFont(&Launcher_TitleFont, 16, FONT_FLAGS_BOLD);
-	Drawer2D_MakeFont(&Launcher_TextFont,  14, FONT_FLAGS_NONE);
-	Drawer2D_MakeFont(&Launcher_HintFont,  12, FONT_FLAGS_NONE);
-	titleX = Display_ScaleX(4); titleY = Display_ScaleY(4);
-
-	Drawer2D.Colors['g'] = BitmapCol_Make(125, 125, 125, 255);
 	Utils_EnsureDirectory("texpacks");
 	Utils_EnsureDirectory("audio");
 }
 
 static void Launcher_Free(void) {
 	Event_UnregisterAll();
+	LBackend_Free();
 	Flags_Free();
-	Font_Free(&logoFont);
-	Font_Free(&Launcher_TitleFont);
-	Font_Free(&Launcher_TextFont);
-	Font_Free(&Launcher_HintFont);
 	hasBitmappedFont = false;
 
 	CloseActiveScreen();
-	activeScreen = NULL;
-	Window_FreeFramebuffer(&Launcher_Framebuffer);
+	LBackend_FreeFramebuffer();
 }
 
 void Launcher_Run(void) {
 	static const cc_string title = String_FromConst(GAME_APP_TITLE);
-	Window_Create(640, 400);
-#ifdef CC_BUILD_ANDROID
-	Window_EnterFullscreen();
+	Window_Create2D(640, 400);
+#ifdef CC_BUILD_MOBILE
+	Window_LockLandscapeOrientation(Options_GetBool(OPT_LANDSCAPE_MODE, false));
 #endif
 	Window_SetTitle(&title);
 	Window_Show();
@@ -294,18 +236,21 @@ void Launcher_Run(void) {
 	Drawer2D_Component.Init();
 	Drawer2D.BitmappedText    = false;
 	Drawer2D.BlackTextShadows = true;
-	InitFramebuffer();
 
+	LBackend_Init();
+	LBackend_InitFramebuffer();
+	Launcher_ShowEmptyServers = Options_GetBool(LOPT_SHOW_EMPTY, true);
 	Options_Get(LOPT_USERNAME, &Launcher_Username, "");
+
 	LWebTasks_Init();
 	Session_Load();
-	Launcher_LoadSkin();
+	Launcher_LoadTheme();
 	Launcher_Init();
 	Launcher_TryLoadTexturePack();
 
 	Http_Component.Init();
-	Resources_CheckExistence();
 	CheckUpdateTask_Run();
+	Resources_CheckExistence();
 
 	if (Resources_Count) {
 		CheckResourcesScreen_SetActive();
@@ -317,28 +262,22 @@ void Launcher_Run(void) {
 		Window_ProcessEvents();
 		if (!WindowInfo.Exists || Launcher_ShouldExit) break;
 
-		activeScreen->Tick(activeScreen);
-		if (Launcher_Dirty.Width) Launcher_Display();
+		Launcher_Active->Tick(Launcher_Active);
+		LBackend_Tick();
 		Thread_Sleep(10);
 	}
 
 	Options_SaveIfChanged();
 	Launcher_Free();
 
-#ifdef CC_BUILD_ANDROID
-	extern int Program_Run(int argc, char** argv);
-	extern cc_bool Window_RemakeSurface(void);
-
-	if (Launcher_ShouldExit) {
-		Launcher_ShouldExit = false;
-		Http_Component.Free();
-
-		Program_Run(0, NULL);
-		Window_ExitFullscreen();
-		Window_RemakeSurface();
-		Launcher_Run();
-	}
-#endif
+#ifdef CC_BUILD_MOBILE
+	/* infinite loop on mobile */
+	Launcher_ShouldExit = false;
+	/* Reset components */
+	Platform_LogConst("undoing components");
+	Drawer2D_Component.Free();
+	Http_Component.Free();
+#else
 	if (Launcher_ShouldUpdate) {
 		const char* action;
 		cc_result res = Updater_Start(&action);
@@ -346,78 +285,108 @@ void Launcher_Run(void) {
 	}
 
 	if (WindowInfo.Exists) Window_Close();
+#endif
 }
 
 
 /*########################################################################################################################*
 *---------------------------------------------------------Colours/Skin----------------------------------------------------*
 *#########################################################################################################################*/
-#define DEFAULT_BACKGROUND_COL         BitmapCol_Make(153, 127, 172, 255)
-#define DEFAULT_BUTTON_BORDER_COL      BitmapCol_Make( 97,  81, 110, 255)
-#define DEFAULT_BUTTON_FORE_ACTIVE_COL BitmapCol_Make(189, 168, 206, 255)
-#define DEFAULT_BUTTON_FORE_COL        BitmapCol_Make(141, 114, 165, 255)
-#define DEFAULT_BUTTON_HIGHLIGHT_COL   BitmapCol_Make(162, 131, 186, 255)
+struct LauncherTheme Launcher_Theme;
+const struct LauncherTheme Launcher_ModernTheme = {
+	false,
+	BitmapColor_RGB(153, 127, 172), /* background */
+	BitmapColor_RGB( 97,  81, 110), /* button border */
+	BitmapColor_RGB(189, 168, 206), /* active button */
+	BitmapColor_RGB(141, 114, 165), /* button foreground */
+	BitmapColor_RGB(162, 131, 186), /* button highlight */
+};
+const struct LauncherTheme Launcher_ClassicTheme = {
+	true,
+	BitmapColor_RGB( 41,  41,  41), /* background */
+	BitmapColor_RGB(  0,   0,   0), /* button border */
+	BitmapColor_RGB(126, 136, 191), /* active button */
+	BitmapColor_RGB(111, 111, 111), /* button foreground */
+	BitmapColor_RGB(168, 168, 168), /* button highlight */
+};
+const struct LauncherTheme Launcher_NordicTheme = {
+	false,
+	BitmapColor_RGB( 46,  52,  64), /* background */
+	BitmapColor_RGB( 59,  66,  82), /* button border */
+	BitmapColor_RGB( 66,  74,  90), /* active button */
+	BitmapColor_RGB( 59,  66,  82), /* button foreground */
+	BitmapColor_RGB( 76,  86, 106), /* button highlight */
+};
 
-BitmapCol Launcher_BackgroundCol       = DEFAULT_BACKGROUND_COL;
-BitmapCol Launcher_ButtonBorderCol     = DEFAULT_BUTTON_BORDER_COL;
-BitmapCol Launcher_ButtonForeActiveCol = DEFAULT_BUTTON_FORE_ACTIVE_COL;
-BitmapCol Launcher_ButtonForeCol       = DEFAULT_BUTTON_FORE_COL;
-BitmapCol Launcher_ButtonHighlightCol  = DEFAULT_BUTTON_HIGHLIGHT_COL;
-
-void Launcher_ResetSkin(void) {
-	Launcher_BackgroundCol       = DEFAULT_BACKGROUND_COL;
-	Launcher_ButtonBorderCol     = DEFAULT_BUTTON_BORDER_COL;
-	Launcher_ButtonForeActiveCol = DEFAULT_BUTTON_FORE_ACTIVE_COL;
-	Launcher_ButtonForeCol       = DEFAULT_BUTTON_FORE_COL;
-	Launcher_ButtonHighlightCol  = DEFAULT_BUTTON_HIGHLIGHT_COL;
-}
-
-CC_NOINLINE static void Launcher_GetCol(const char* key, BitmapCol* col) {
+CC_NOINLINE static void ParseColor(const char* key, BitmapCol* color) {
 	cc_uint8 rgb[3];
 	cc_string value;
 	if (!Options_UNSAFE_Get(key, &value))    return;
 	if (!PackedCol_TryParseHex(&value, rgb)) return;
 
-	*col = BitmapCol_Make(rgb[0], rgb[1], rgb[2], 255);
+	*color = BitmapColor_RGB(rgb[0], rgb[1], rgb[2]);
 }
 
-void Launcher_LoadSkin(void) {
-	Launcher_GetCol("launcher-back-col",                   &Launcher_BackgroundCol);
-	Launcher_GetCol("launcher-btn-border-col",             &Launcher_ButtonBorderCol);
-	Launcher_GetCol("launcher-btn-fore-active-col",        &Launcher_ButtonForeActiveCol);
-	Launcher_GetCol("launcher-btn-fore-inactive-col",      &Launcher_ButtonForeCol);
-	Launcher_GetCol("launcher-btn-highlight-inactive-col", &Launcher_ButtonHighlightCol);
+void Launcher_LoadTheme(void) {
+	if (Options_GetBool(OPT_CLASSIC_MODE, false)) {
+		Launcher_Theme = Launcher_ClassicTheme;
+		return;
+	}
+	Launcher_Theme = Launcher_ModernTheme;
+	Launcher_Theme.ClassicBackground = Options_GetBool("nostalgia-classicbg", false);
+
+	ParseColor("launcher-back-col",                   &Launcher_Theme.BackgroundColor);
+	ParseColor("launcher-btn-border-col",             &Launcher_Theme.ButtonBorderColor);
+	ParseColor("launcher-btn-fore-active-col",        &Launcher_Theme.ButtonForeActiveColor);
+	ParseColor("launcher-btn-fore-inactive-col",      &Launcher_Theme.ButtonForeColor);
+	ParseColor("launcher-btn-highlight-inactive-col", &Launcher_Theme.ButtonHighlightColor);
 }
 
-CC_NOINLINE static void Launcher_SetCol(const char* key, BitmapCol col) {
-	cc_string value; char valueBuffer[8];
-	/* Component order might be different to BitmapCol */
-	PackedCol tmp = PackedCol_Make(BitmapCol_R(col), BitmapCol_G(col), BitmapCol_B(col), 0);
+CC_NOINLINE static void SaveColor(const char* key, BitmapCol color) {
+	cc_string value; char valueBuffer[6];
 	
 	String_InitArray(value, valueBuffer);
-	PackedCol_ToHex(&value, tmp);
+	String_AppendHex(&value, BitmapCol_R(color));
+	String_AppendHex(&value, BitmapCol_G(color));
+	String_AppendHex(&value, BitmapCol_B(color));
 	Options_Set(key, &value);
 }
 
-void Launcher_SaveSkin(void) {
-	Launcher_SetCol("launcher-back-col",                   Launcher_BackgroundCol);
-	Launcher_SetCol("launcher-btn-border-col",             Launcher_ButtonBorderCol);
-	Launcher_SetCol("launcher-btn-fore-active-col",        Launcher_ButtonForeActiveCol);
-	Launcher_SetCol("launcher-btn-fore-inactive-col",      Launcher_ButtonForeCol);
-	Launcher_SetCol("launcher-btn-highlight-inactive-col", Launcher_ButtonHighlightCol);
+void Launcher_SaveTheme(void) {
+	SaveColor("launcher-back-col",                   Launcher_Theme.BackgroundColor);
+	SaveColor("launcher-btn-border-col",             Launcher_Theme.ButtonBorderColor);
+	SaveColor("launcher-btn-fore-active-col",        Launcher_Theme.ButtonForeActiveColor);
+	SaveColor("launcher-btn-fore-inactive-col",      Launcher_Theme.ButtonForeColor);
+	SaveColor("launcher-btn-highlight-inactive-col", Launcher_Theme.ButtonHighlightColor);
+	Options_SetBool("nostalgia-classicbg",                 Launcher_Theme.ClassicBackground);
 }
 
 
 /*########################################################################################################################*
-*----------------------------------------------------------Background-----------------------------------------------------*
+*---------------------------------------------------------Texture pack----------------------------------------------------*
 *#########################################################################################################################*/
-static cc_bool Launcher_SelectZipEntry(const cc_string* path) {
-	return
-		String_CaselessEqualsConst(path, "default.png") ||
-		String_CaselessEqualsConst(path, "terrain.png");
+/* Tints the given area, linearly interpolating from a to b */
+/*  Note that this only tints RGB, A is not tinted */
+static void TintBitmap(struct Bitmap* bmp, cc_uint8 tintA, cc_uint8 tintB, int width, int height) {
+	BitmapCol* row;
+	cc_uint8 tint;
+	int xx, yy;
+
+	for (yy = 0; yy < height; yy++) {
+		row  = Bitmap_GetRow(bmp, yy);
+		tint = (cc_uint8)Math_Lerp(tintA, tintB, (float)yy / height);
+
+		for (xx = 0; xx < width; xx++) {
+			/* TODO: Not shift when multiplying */
+			row[xx] = BitmapColor_RGB(
+				BitmapCol_R(row[xx]) * tint / 255,
+				BitmapCol_G(row[xx]) * tint / 255,
+				BitmapCol_B(row[xx]) * tint / 255);
+		}
+	}
 }
 
-static void LoadTextures(struct Bitmap* bmp) {
+static void ExtractTerrainTiles(struct Bitmap* bmp) {
 	int tileSize = bmp->width / 16;
 	Bitmap_Allocate(&dirtBmp,  TILESIZE, TILESIZE);
 	Bitmap_Allocate(&stoneBmp, TILESIZE, TILESIZE);
@@ -426,11 +395,17 @@ static void LoadTextures(struct Bitmap* bmp) {
 	Bitmap_Scale(&dirtBmp,  bmp, 2 * tileSize, 0, tileSize, tileSize);
 	Bitmap_Scale(&stoneBmp, bmp, 1 * tileSize, 0, tileSize, tileSize);
 
-	Gradient_Tint(&dirtBmp, 128, 64, 0, 0, TILESIZE, TILESIZE);
-	Gradient_Tint(&stoneBmp, 96, 96, 0, 0, TILESIZE, TILESIZE);
+	TintBitmap(&dirtBmp, 128, 64, TILESIZE, TILESIZE);
+	TintBitmap(&stoneBmp, 96, 96, TILESIZE, TILESIZE);
 }
 
-static cc_result Launcher_ProcessZipEntry(const cc_string* path, struct Stream* data, struct ZipState* s) {
+static cc_bool Launcher_SelectZipEntry(const cc_string* path) {
+	return
+		String_CaselessEqualsConst(path, "default.png") ||
+		String_CaselessEqualsConst(path, "terrain.png");
+}
+
+static cc_result Launcher_ProcessZipEntry(const cc_string* path, struct Stream* data, struct ZipEntry* source) {
 	struct Bitmap bmp;
 	cc_result res;
 
@@ -441,27 +416,26 @@ static cc_result Launcher_ProcessZipEntry(const cc_string* path, struct Stream* 
 
 		if (res) {
 			Logger_SysWarn(res, "decoding default.png"); return res;
-		} else if (Drawer2D_SetFontBitmap(&bmp)) {
+		} else if (Font_SetBitmapAtlas(&bmp)) {
 			useBitmappedFont = !Options_GetBool(OPT_USE_CHAT_FONT, false);
 			hasBitmappedFont = true;
 		} else {
 			Mem_Free(bmp.scan0);
 		}
 	} else if (String_CaselessEqualsConst(path, "terrain.png")) {
-		if (dirtBmp.scan0) return 0;
+		if (dirtBmp.scan0 != NULL) return 0;
 		res = Png_Decode(&bmp, data);
 
 		if (res) {
 			Logger_SysWarn(res, "decoding terrain.png"); return res;
 		} else {
-			LoadTextures(&bmp);
+			ExtractTerrainTiles(&bmp);
 		}
 	}
 	return 0;
 }
 
 static void ExtractTexturePack(const cc_string* path) {
-	struct ZipState state;
 	struct Stream stream;
 	cc_result res;
 
@@ -469,25 +443,18 @@ static void ExtractTexturePack(const cc_string* path) {
 	if (res == ReturnCode_FileNotFound) return;
 	if (res) { Logger_SysWarn(res, "opening texture pack"); return; }
 
-	Zip_Init(&state, &stream);
-	state.SelectEntry  = Launcher_SelectZipEntry;
-	state.ProcessEntry = Launcher_ProcessZipEntry;
-	res = Zip_Extract(&state);
+	res = Zip_Extract(&stream, 
+			Launcher_SelectZipEntry, Launcher_ProcessZipEntry);
 
 	if (res) { Logger_SysWarn(res, "extracting texture pack"); }
-	stream.Close(&stream);
+	/* No point logging error for closing readonly file */
+	(void)stream.Close(&stream);
 }
 
 void Launcher_TryLoadTexturePack(void) {
-	static const cc_string defZipPath = String_FromConst("texpacks/default.zip");
+	static const cc_string defZip = String_FromConst("texpacks/default.zip");
 	cc_string path; char pathBuffer[FILENAME_SIZE];
 	cc_string texPack;
-
-	if (Options_UNSAFE_Get("nostalgia-classicbg", &texPack)) {
-		Launcher_ClassicBackground = Options_GetBool("nostalgia-classicbg", false);
-	} else {
-		Launcher_ClassicBackground = Options_GetBool(OPT_CLASSIC_MODE,      false);
-	}
 
 	if (Options_UNSAFE_Get(OPT_DEFAULT_TEX_PACK, &texPack)) {
 		String_InitArray(path, pathBuffer);
@@ -496,24 +463,22 @@ void Launcher_TryLoadTexturePack(void) {
 	}
 
 	/* user selected texture pack is missing some required .png files */
-	if (!hasBitmappedFont || !dirtBmp.scan0) ExtractTexturePack(&defZipPath);
-	Launcher_UpdateLogoFont();
+	if (!hasBitmappedFont || dirtBmp.scan0 == NULL) ExtractTexturePack(&defZip);
+	LBackend_UpdateLogoFont();
 }
 
-void Launcher_UpdateLogoFont(void) {
-	Font_Free(&logoFont);
-	Drawer2D.BitmappedText = (useBitmappedFont || Launcher_ClassicBackground) && hasBitmappedFont;
-	Drawer2D_MakeFont(&logoFont, 32, FONT_FLAGS_NONE);
-	Drawer2D.BitmappedText = false;
-}
 
-/* Fills the given area using pixels from the source bitmap, by repeatedly tiling the bitmap. */
-CC_NOINLINE static void ClearTile(int x, int y, int width, int height, struct Bitmap* src) {
-	struct Bitmap* dst = &Launcher_Framebuffer;
+/*########################################################################################################################*
+*----------------------------------------------------------Background-----------------------------------------------------*
+*#########################################################################################################################*/
+/* Fills the given area using pixels from the source bitmap, by repeatedly tiling the bitmap */
+CC_NOINLINE static void ClearTile(int x, int y, int width, int height, 
+								struct Context2D* ctx, struct Bitmap* src) {
+	struct Bitmap* dst = (struct Bitmap*)ctx;
 	BitmapCol* dstRow;
 	BitmapCol* srcRow;
 	int xx, yy;
-	if (!Drawer2D_Clamp(dst, &x, &y, &width, &height)) return;
+	if (!Drawer2D_Clamp(ctx, &x, &y, &width, &height)) return;
 
 	for (yy = 0; yy < height; yy++) {
 		srcRow = Bitmap_GetRow(src, (y + yy) % TILESIZE);
@@ -525,71 +490,44 @@ CC_NOINLINE static void ClearTile(int x, int y, int width, int height, struct Bi
 	}
 }
 
-void Launcher_ResetArea(int x, int y, int width, int height) {
-	if (Launcher_ClassicBackground && dirtBmp.scan0) {
-		ClearTile(x, y, width, height, &stoneBmp);
+void Launcher_DrawBackground(struct Context2D* ctx, int x, int y, int width, int height) {
+	if (Launcher_Theme.ClassicBackground && dirtBmp.scan0) {
+		ClearTile(x, y, width, height, ctx, &stoneBmp);
 	} else {
-		Gradient_Noise(&Launcher_Framebuffer, Launcher_BackgroundCol, 6, x, y, width, height);
+		Gradient_Noise(ctx, Launcher_Theme.BackgroundColor, 6, x, y, width, height);
 	}
-	Launcher_MarkDirty(x, y, width, height);
 }
 
-void Launcher_ResetPixels(void) {
-	static const cc_string title_fore = String_FromConst("&eClassi&fCube");
-	static const cc_string title_back = String_FromConst("&0Classi&0Cube");
+void Launcher_DrawBackgroundAll(struct Context2D* ctx) {
+	if (Launcher_Theme.ClassicBackground && dirtBmp.scan0) {
+		ClearTile(0,        0, ctx->width,               TILESIZE, ctx, &dirtBmp);
+		ClearTile(0, TILESIZE, ctx->width, ctx->height - TILESIZE, ctx, &stoneBmp);
+	} else {
+		Launcher_DrawBackground(ctx, 0, 0, ctx->width, ctx->height);
+	}
+}
+
+cc_bool Launcher_BitmappedText(void) {
+	return (useBitmappedFont || Launcher_Theme.ClassicBackground) && hasBitmappedFont;
+}
+
+void Launcher_DrawLogo(struct FontDesc* font, const char* text, struct Context2D* ctx) {
+	cc_string title = String_FromReadonly(text);
 	struct DrawTextArgs args;
 	int x;
 
-	if (activeScreen && activeScreen->hidesTitlebar) {
-		Launcher_ResetArea(0, 0, WindowInfo.Width, WindowInfo.Height);
-		return;
-	}
+	DrawTextArgs_Make(&args, &title, font, false);
+	x = ctx->width / 2 - Drawer2D_TextWidth(&args) / 2;
 
-	if (Launcher_ClassicBackground && dirtBmp.scan0) {
-		ClearTile(0,        0, WindowInfo.Width,                     TILESIZE, &dirtBmp);
-		ClearTile(0, TILESIZE, WindowInfo.Width, WindowInfo.Height - TILESIZE, &stoneBmp);
-	} else {
-		Launcher_ResetArea(0, 0, WindowInfo.Width, WindowInfo.Height);
-	}
-
-	DrawTextArgs_Make(&args, &title_fore, &logoFont, false);
-	x = WindowInfo.Width / 2 - Drawer2D_TextWidth(&args) / 2;
-
-	args.text = title_back;
-	Drawer2D_DrawText(&Launcher_Framebuffer, &args, x + titleX, titleY);
-	args.text = title_fore;
-	Drawer2D_DrawText(&Launcher_Framebuffer, &args, x, 0);
-	Launcher_MarkAllDirty();
+	Drawer2D.Colors['f'] = BITMAPCOLOR_BLACK;
+	Context2D_DrawText(ctx, &args, x + Display_ScaleX(4), Display_ScaleY(4));
+	Drawer2D.Colors['f'] = BITMAPCOLOR_WHITE;
+	Context2D_DrawText(ctx, &args, x,                     0);
 }
 
-void Launcher_Redraw(void) {
-	Launcher_ResetPixels();
-	activeScreen->Draw(activeScreen);
-	Launcher_MarkAllDirty();
-}
-
-void Launcher_MarkDirty(int x, int y, int width, int height) {
-	int x1, y1, x2, y2;
-	if (!Drawer2D_Clamp(&Launcher_Framebuffer, &x, &y, &width, &height)) return;
-
-	/* union with existing dirty area */
-	if (Launcher_Dirty.Width) {
-		x1 = min(x, Launcher_Dirty.X);
-		y1 = min(y, Launcher_Dirty.Y);
-
-		x2 = max(x +  width, Launcher_Dirty.X + Launcher_Dirty.Width);
-		y2 = max(y + height, Launcher_Dirty.Y + Launcher_Dirty.Height);
-
-		x = x1; width  = x2 - x1;
-		y = y1; height = y2 - y1;
-	}
-
-	Launcher_Dirty.X = x; Launcher_Dirty.Width  = width;
-	Launcher_Dirty.Y = y; Launcher_Dirty.Height = height;
-}
-
-void Launcher_MarkAllDirty(void) {
-	Launcher_Dirty.X = 0; Launcher_Dirty.Width  = Launcher_Framebuffer.width;
-	Launcher_Dirty.Y = 0; Launcher_Dirty.Height = Launcher_Framebuffer.height;
+void Launcher_MakeLogoFont(struct FontDesc* font) {
+	Drawer2D.BitmappedText = Launcher_BitmappedText();
+	Font_Make(font, 32, FONT_FLAGS_NONE);
+	Drawer2D.BitmappedText = false;
 }
 #endif

@@ -23,21 +23,19 @@ int Builder_SidesLevel, Builder_EdgeLevel;
 static BlockID* Builder_Chunk;
 static cc_uint8* Builder_Counts;
 static int* Builder_BitFlags;
-static cc_bool Builder_UseBitFlags;
 static int Builder_X, Builder_Y, Builder_Z;
 static BlockID Builder_Block;
 static int Builder_ChunkIndex;
 static cc_bool Builder_FullBright;
-static cc_bool Builder_Tinted;
 static int Builder_ChunkEndX, Builder_ChunkEndZ;
 static int Builder_Offsets[FACE_COUNT] = { -1,1, -EXTCHUNK_SIZE,EXTCHUNK_SIZE, -EXTCHUNK_SIZE_2,EXTCHUNK_SIZE_2 };
 
 static int (*Builder_StretchXLiquid)(int countIndex, int x, int y, int z, int chunkIndex, BlockID block);
 static int (*Builder_StretchX)(int countIndex, int x, int y, int z, int chunkIndex, BlockID block, Face face);
 static int (*Builder_StretchZ)(int countIndex, int x, int y, int z, int chunkIndex, BlockID block, Face face);
-static void (*Builder_RenderBlock)(int countsIndex);
-static void (*Builder_PreStretchTiles)(void);
-static void (*Builder_PostStretchTiles)(void);
+static void (*Builder_RenderBlock)(int countsIndex, int x, int y, int z);
+static void (*Builder_PrePrepareChunk)(void);
+static void (*Builder_PostPrepareChunk)(void);
 
 /* Contains state for vertices for a portion of a chunk mesh (vertices that are in a 1D atlas) */
 struct Builder1DPart {
@@ -143,7 +141,7 @@ static void SetPartInfo(struct Builder1DPart* part, int* offset, struct ChunkPar
 }
 
 
-static void Builder_Stretch(int x1, int y1, int z1) {
+static void PrepareChunk(int x1, int y1, int z1) {
 	int xMax = min(World.Width,  x1 + CHUNK_SIZE);
 	int yMax = min(World.Height, y1 + CHUNK_SIZE);
 	int zMax = min(World.Length, z1 + CHUNK_SIZE);
@@ -207,7 +205,7 @@ static void Builder_Stretch(int x1, int y1, int z1) {
 					(z != 0 && (Blocks.Hidden[tileIdx + Builder_Chunk[cIndex - EXTCHUNK_SIZE]] & (1 << FACE_ZMIN)) != 0)) {
 					Builder_Counts[index] = 0;
 				} else {
-					Builder_Counts[index] = Builder_StretchX(index, Builder_X, Builder_Y, Builder_Z, cIndex, b, FACE_ZMIN);
+					Builder_Counts[index] = Builder_StretchX(index, x, y, z, cIndex, b, FACE_ZMIN);
 				}
 
 				index++;
@@ -343,7 +341,7 @@ static cc_bool BuildChunk(int x1, int y1, int z1, struct ChunkInfo* info) {
 	Builder_Chunk  = chunk;
 	Builder_Counts = counts;
 	Builder_BitFlags = bitFlags;
-	Builder_PreStretchTiles();
+	Builder_PrePrepareChunk();
 	
 	onBorder = 
 		x1 == 0 || y1 == 0 || z1 == 0   || x1 + CHUNK_SIZE >= World.Width ||
@@ -359,7 +357,7 @@ static cc_bool BuildChunk(int x1, int y1, int z1, struct ChunkInfo* info) {
 
 	info->AllAir = allAir;
 	if (allAir || allSolid) return false;
-	Lighting_LightHint(x1 - 1, z1 - 1);
+	Lighting.LightHint(x1 - 1, z1 - 1);
 
 	Mem_Set(counts, 1, CHUNK_SIZE_3 * FACE_COUNT);
 	xMax = min(World.Width,  x1 + CHUNK_SIZE);
@@ -367,7 +365,7 @@ static cc_bool BuildChunk(int x1, int y1, int z1, struct ChunkInfo* info) {
 	zMax = min(World.Length, z1 + CHUNK_SIZE);
 
 	Builder_ChunkEndX = xMax; Builder_ChunkEndZ = zMax;
-	Builder_Stretch(x1, y1, z1);
+	PrepareChunk(x1, y1, z1);
 
 	totalVerts = Builder_TotalVerticesCount();
 	if (!totalVerts) return false;
@@ -381,7 +379,8 @@ static cc_bool BuildChunk(int x1, int y1, int z1, struct ChunkInfo* info) {
 	Builder_Vertices = (struct VertexTextured*)Gfx_LockVb(0, 
 													VERTEX_FORMAT_TEXTURED, totalVerts + 1);
 #endif
-	Builder_PostStretchTiles();
+	Builder_PostPrepareChunk();
+	/* now render the chunk */
 
 	for (y = y1, yy = 0; y < yMax; y++, yy++) {
 		for (z = z1, zz = 0; z < zMax; z++, zz++) {
@@ -392,9 +391,8 @@ static cc_bool BuildChunk(int x1, int y1, int z1, struct ChunkInfo* info) {
 				if (Blocks.Draw[Builder_Block] == DRAW_GAS) continue;
 
 				index = Builder_PackCount(xx, yy, zz);
-				Builder_X = x; Builder_Y = y; Builder_Z = z;
 				Builder_ChunkIndex = cIndex;
-				Builder_RenderBlock(index);
+				Builder_RenderBlock(index, x, y, z);
 			}
 		}
 	}
@@ -414,14 +412,14 @@ void Builder_MakeChunk(struct ChunkInfo* info) {
 	hasMesh = BuildChunk(x, y, z, info);
 	if (!hasMesh) return;
 
-	partsIndex = MapRenderer_Pack(x >> CHUNK_SHIFT, y >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
+	partsIndex = World_ChunkPack(x >> CHUNK_SHIFT, y >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
 	offset  = 0;
 	hasNorm = false;
 	hasTran = false;
 
 	for (i = 0; i < MapRenderer_1DUsedCount; i++) {
 		j = i + ATLAS1D_MAX_ATLASES;
-		curIdx = partsIndex + i * MapRenderer_ChunksCount;
+		curIdx = partsIndex + i * World.ChunksCount;
 
 		SetPartInfo(&Builder_Parts[i], &offset, &MapRenderer_PartsNormal[curIdx],      &hasNorm);
 		SetPartInfo(&Builder_Parts[j], &offset, &MapRenderer_PartsTranslucent[curIdx], &hasTran);
@@ -450,11 +448,11 @@ static cc_bool Builder_OccludedLiquid(int chunkIndex) {
 		&& Blocks.Draw[Builder_Chunk[chunkIndex + EXTCHUNK_SIZE]] != DRAW_GAS;
 }
 
-static void DefaultPreStretchTiles(void) {
+static void DefaultPrePrepateChunk(void) {
 	Mem_Set(Builder_Parts, 0, sizeof(Builder_Parts));
 }
 
-static void DefaultPostStretchTiles(void) {
+static void DefaultPostStretchChunk(void) {
 	int i, j, offset;
 	offset = 0;
 	for (i = 0; i < ATLAS1D_MAX_ATLASES; i++) {
@@ -466,12 +464,11 @@ static void DefaultPostStretchTiles(void) {
 }
 
 static RNGState spriteRng;
-static void Builder_DrawSprite(void) {
+static void Builder_DrawSprite(int x, int y, int z) {
 	struct Builder1DPart* part;
 	struct VertexTextured v;
-	PackedCol white = PACKEDCOL_WHITE;
-
 	cc_uint8 offsetType;
+	cc_bool bright;
 	TextureLoc loc;
 	float v1, v2;
 	int index;
@@ -480,7 +477,7 @@ static void Builder_DrawSprite(void) {
 	float valX, valY, valZ;
 	float x1,y1,z1, x2,y2,z2;
 	
-	X  = (float)Builder_X; Y = (float)Builder_Y; Z = (float)Builder_Z;
+	X  = (float)x; Y = (float)y; Z = (float)z;
 	x1 = X + 2.50f/16.0f; y1 = Y;        z1 = Z + 2.50f/16.0f;
 	x2 = X + 13.5f/16.0f; y2 = Y + 1.0f; z2 = Z + 13.5f/16.0f;
 
@@ -492,7 +489,7 @@ static void Builder_DrawSprite(void) {
 
 	offsetType = Blocks.SpriteOffset[Builder_Block];
 	if (offsetType >= 6 && offsetType <= 7) {
-		Random_Seed(&spriteRng, (Builder_X + 1217 * Builder_Z) & 0x7fffffff);
+		Random_Seed(&spriteRng, (x + 1217 * z) & 0x7fffffff);
 		valX = Random_Range(&spriteRng, -3, 3 + 1) / 16.0f;
 		valY = Random_Range(&spriteRng, 0,  3 + 1) / 16.0f;
 		valZ = Random_Range(&spriteRng, -3, 3 + 1) / 16.0f;
@@ -502,8 +499,9 @@ static void Builder_DrawSprite(void) {
 		if (offsetType == 7) { y1 -= valY; y2 -= valY; }
 	}
 	
-	part  = &Builder_Parts[Atlas1D_Index(loc)];
-	v.Col = Builder_FullBright ? white : Lighting_Col_Sprite_Fast(Builder_X, Builder_Y, Builder_Z);
+	bright = Blocks.FullBright[Builder_Block];
+	part   = &Builder_Parts[Atlas1D_Index(loc)];
+	v.Col  = bright ? PACKEDCOL_WHITE : Lighting.Color_Sprite_Fast(x, y, z);
 	Block_Tint(v.Col, Builder_Block);
 
 	/* Draw Z axis */
@@ -541,22 +539,23 @@ static void Builder_DrawSprite(void) {
 /*########################################################################################################################*
 *--------------------------------------------------Normal mesh builder----------------------------------------------------*
 *#########################################################################################################################*/
-static PackedCol Normal_LightCol(int x, int y, int z, Face face, BlockID block) {
+static PackedCol Normal_LightColor(int x, int y, int z, Face face, BlockID block) {
 	int offset = (Blocks.LightOffset[block] >> face) & 1;
 
 	switch (face) {
 	case FACE_XMIN:
-		return x < offset                ? Env.SunXSide : Lighting_Col_XSide_Fast(x - offset, y, z);
+		return x < offset                ? Env.SunXSide : Lighting.Color_XSide_Fast(x - offset, y, z);
 	case FACE_XMAX:
-		return x > (World.MaxX - offset) ? Env.SunXSide : Lighting_Col_XSide_Fast(x + offset, y, z);
+		return x > (World.MaxX - offset) ? Env.SunXSide : Lighting.Color_XSide_Fast(x + offset, y, z);
 	case FACE_ZMIN:
-		return z < offset                ? Env.SunZSide : Lighting_Col_ZSide_Fast(x, y, z - offset);
+		return z < offset                ? Env.SunZSide : Lighting.Color_ZSide_Fast(x, y, z - offset);
 	case FACE_ZMAX:
-		return z > (World.MaxZ - offset) ? Env.SunZSide : Lighting_Col_ZSide_Fast(x, y, z + offset);
+		return z > (World.MaxZ - offset) ? Env.SunZSide : Lighting.Color_ZSide_Fast(x, y, z + offset);
+
 	case FACE_YMIN:
-		return y <= 0                    ? Env.SunYMin  : Lighting_Col_YMin_Fast(x, y - offset, z);
+		return Lighting.Color_YMin_Fast(x, y - offset, z);		
 	case FACE_YMAX:
-		return y >= World.MaxY           ? Env.SunCol   : Lighting_Col_YMax_Fast(x, (y + 1) - offset, z);
+		return Lighting.Color_YMax_Fast(x, y + offset, z);
 	}
 	return 0; /* should never happen */
 }
@@ -567,7 +566,7 @@ static cc_bool Normal_CanStretch(BlockID initial, int chunkIndex, int x, int y, 
 	if (cur != initial || Block_IsFaceHidden(cur, Builder_Chunk[chunkIndex + Builder_Offsets[face]], face)) return false;
 	if (Builder_FullBright) return true;
 
-	return Normal_LightCol(Builder_X, Builder_Y, Builder_Z, face, initial) == Normal_LightCol(x, y, z, face, cur);
+	return Normal_LightColor(Builder_X, Builder_Y, Builder_Z, face, initial) == Normal_LightColor(x, y, z, face, cur);
 }
 
 static int NormalBuilder_StretchXLiquid(int countIndex, int x, int y, int z, int chunkIndex, BlockID block) {
@@ -626,13 +625,12 @@ static int NormalBuilder_StretchZ(int countIndex, int x, int y, int z, int chunk
 	return count;
 }
 
-static void NormalBuilder_RenderBlock(int index) {	
+static void NormalBuilder_RenderBlock(int index, int x, int y, int z) {	
 	/* counters */
 	int count_XMin, count_XMax, count_ZMin;
 	int count_ZMax, count_YMin, count_YMax;
 
 	/* block state */
-	PackedCol white = PACKEDCOL_WHITE;
 	Vec3 min, max;
 	int baseOffset, lightFlags;
 	cc_bool fullBright;
@@ -644,10 +642,7 @@ static void NormalBuilder_RenderBlock(int index) {
 	int offset;
 
 	if (Blocks.Draw[Builder_Block] == DRAW_SPRITE) {
-		Builder_FullBright = Blocks.FullBright[Builder_Block];
-		Builder_Tinted     = Blocks.Tinted[Builder_Block];
-		Builder_DrawSprite();
-		return;
+		Builder_DrawSprite(x, y, z); return;
 	}
 
 	count_XMin = Builder_Counts[index + FACE_XMIN];
@@ -668,8 +663,8 @@ static void NormalBuilder_RenderBlock(int index) {
 	Drawer.MaxBB = Blocks.MaxBB[Builder_Block]; Drawer.MaxBB.Y = 1.0f - Drawer.MaxBB.Y;
 
 	min = Blocks.RenderMinBB[Builder_Block]; max = Blocks.RenderMaxBB[Builder_Block];
-	Drawer.X1 = Builder_X + min.X; Drawer.Y1 = Builder_Y + min.Y; Drawer.Z1 = Builder_Z + min.Z;
-	Drawer.X2 = Builder_X + max.X; Drawer.Y2 = Builder_Y + max.Y; Drawer.Z2 = Builder_Z + max.Z;
+	Drawer.X1 = x + min.X; Drawer.Y1 = y + min.Y; Drawer.Z1 = z + min.Z;
+	Drawer.X2 = x + max.X; Drawer.Y2 = y + max.Y; Drawer.Z2 = z + max.Z;
 
 	Drawer.Tinted  = Blocks.Tinted[Builder_Block];
 	Drawer.TintCol = Blocks.FogCol[Builder_Block];
@@ -679,8 +674,8 @@ static void NormalBuilder_RenderBlock(int index) {
 		offset = (lightFlags >> FACE_XMIN) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
-		col = fullBright ? white :
-			Builder_X >= offset ? Lighting_Col_XSide_Fast(Builder_X - offset, Builder_Y, Builder_Z) : Env.SunXSide;
+		col = fullBright ? PACKEDCOL_WHITE :
+			x >= offset ? Lighting.Color_XSide_Fast(x - offset, y, z) : Env.SunXSide;
 		Drawer_XMin(count_XMin, col, loc, &part->fVertices[FACE_XMIN]);
 	}
 
@@ -689,8 +684,8 @@ static void NormalBuilder_RenderBlock(int index) {
 		offset = (lightFlags >> FACE_XMAX) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
-		col = fullBright ? white :
-			Builder_X <= (World.MaxX - offset) ? Lighting_Col_XSide_Fast(Builder_X + offset, Builder_Y, Builder_Z) : Env.SunXSide;
+		col = fullBright ? PACKEDCOL_WHITE :
+			x <= (World.MaxX - offset) ? Lighting.Color_XSide_Fast(x + offset, y, z) : Env.SunXSide;
 		Drawer_XMax(count_XMax, col, loc, &part->fVertices[FACE_XMAX]);
 	}
 
@@ -699,8 +694,8 @@ static void NormalBuilder_RenderBlock(int index) {
 		offset = (lightFlags >> FACE_ZMIN) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
-		col = fullBright ? white :
-			Builder_Z >= offset ? Lighting_Col_ZSide_Fast(Builder_X, Builder_Y, Builder_Z - offset) : Env.SunZSide;
+		col = fullBright ? PACKEDCOL_WHITE :
+			z >= offset ? Lighting.Color_ZSide_Fast(x, y, z - offset) : Env.SunZSide;
 		Drawer_ZMin(count_ZMin, col, loc, &part->fVertices[FACE_ZMIN]);
 	}
 
@@ -709,8 +704,8 @@ static void NormalBuilder_RenderBlock(int index) {
 		offset = (lightFlags >> FACE_ZMAX) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
-		col = fullBright ? white :
-			Builder_Z <= (World.MaxZ - offset) ? Lighting_Col_ZSide_Fast(Builder_X, Builder_Y, Builder_Z + offset) : Env.SunZSide;
+		col = fullBright ? PACKEDCOL_WHITE :
+			z <= (World.MaxZ - offset) ? Lighting.Color_ZSide_Fast(x, y, z + offset) : Env.SunZSide;
 		Drawer_ZMax(count_ZMax, col, loc, &part->fVertices[FACE_ZMAX]);
 	}
 
@@ -719,7 +714,7 @@ static void NormalBuilder_RenderBlock(int index) {
 		offset = (lightFlags >> FACE_YMIN) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
-		col = fullBright ? white : Lighting_Col_YMin_Fast(Builder_X, Builder_Y - offset, Builder_Z);
+		col = fullBright ? PACKEDCOL_WHITE : Lighting.Color_YMin_Fast(x, y - offset, z);
 		Drawer_YMin(count_YMin, col, loc, &part->fVertices[FACE_YMIN]);
 	}
 
@@ -728,7 +723,7 @@ static void NormalBuilder_RenderBlock(int index) {
 		offset = (lightFlags >> FACE_YMAX) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
-		col = fullBright ? white : Lighting_Col_YMax_Fast(Builder_X, (Builder_Y + 1) - offset, Builder_Z);
+		col = fullBright ? PACKEDCOL_WHITE : Lighting.Color_YMax_Fast(x, y + offset, z);
 		Drawer_YMax(count_YMax, col, loc, &part->fVertices[FACE_YMAX]);
 	}
 }
@@ -739,9 +734,8 @@ static void Builder_SetDefault(void) {
 	Builder_StretchZ       = NULL;
 	Builder_RenderBlock    = NULL;
 
-	Builder_UseBitFlags      = false;
-	Builder_PreStretchTiles  = DefaultPreStretchTiles;
-	Builder_PostStretchTiles = DefaultPostStretchTiles;
+	Builder_PrePrepareChunk  = DefaultPrePrepateChunk;
+	Builder_PostPrepareChunk = DefaultPostStretchChunk;
 }
 
 static void NormalBuilder_SetActive(void) {
@@ -757,10 +751,11 @@ static void NormalBuilder_SetActive(void) {
 *-------------------------------------------------Advanced mesh builder---------------------------------------------------*
 *#########################################################################################################################*/
 static Vec3 adv_minBB, adv_maxBB;
-static int adv_initBitFlags, adv_lightFlags, adv_baseOffset;
+static int adv_initBitFlags, adv_baseOffset;
 static int* adv_bitFlags;
 static float adv_x1, adv_y1, adv_z1, adv_x2, adv_y2, adv_z2;
 static PackedCol adv_lerp[5], adv_lerpX[5], adv_lerpZ[5], adv_lerpY[5];
+static cc_bool adv_tinted;
 
 enum ADV_MASK {
 	/* z-1 cube points */
@@ -777,36 +772,47 @@ enum ADV_MASK {
 	xP1_yM1_zP1, xP1_yCC_zP1, xP1_yP1_zP1,
 };
 
+/* Bit-or the Adv_Lit flags with these to set the appropriate light values */
+#define LIT_M1 (1 << 0)
+#define LIT_CC (1 << 1)
+#define LIT_P1 (1 << 2)
+/* Returns a 3 bit value where */
+/* - bit 0 set: Y-1 is in light */
+/* - bit 1 set: Y   is in light */
+/* - bit 2 set: Y+1 is in light */
 static int Adv_Lit(int x, int y, int z, int cIndex) {
-	int flags, offset, lightHeight;
+	int flags, offset, lightFlags;
 	BlockID block;
-	if (y < 0 || y >= World.Height) return 7; /* all faces lit */
+	if (y < 0 || y >= World.Height) return LIT_M1 | LIT_CC | LIT_P1; /* all faces lit */
 
 	/* TODO: check sides height (if sides > edges), check if edge block casts a shadow */
 	if (!World_ContainsXZ(x, z)) {
-		return y >= Builder_EdgeLevel ? 7 : y == (Builder_EdgeLevel - 1) ? 6 : 0;
+		return y >= Builder_EdgeLevel ? LIT_M1 | LIT_CC | LIT_P1 : y == (Builder_EdgeLevel - 1) ? LIT_CC | LIT_P1 : 0;
 	}
 
 	flags = 0;
 	block = Builder_Chunk[cIndex];
-	lightHeight    = Lighting_Heightmap[Lighting_Pack(x, z)];
-	adv_lightFlags = Blocks.LightOffset[block];
+	lightFlags = Blocks.LightOffset[block];
+
+	/* TODO using LIGHT_FLAG_SHADES_FROM_BELOW is wrong here, */
+	/*  but still produces less broken results than YMIN/YMAX */
 
 	/* Use fact Light(Y.YMin) == Light((Y-1).YMax) */
-	offset = (adv_lightFlags >> FACE_YMIN) & 1;
-	flags |= ((y - offset) > lightHeight ? 1 : 0);
+	offset = (lightFlags >> LIGHT_FLAG_SHADES_FROM_BELOW) & 1;
+	flags |= Lighting.IsLit_Fast(x, y - offset, z) ? LIT_M1 : 0;
 
 	/* Light is same for all the horizontal faces */
-	flags |= (y > lightHeight ? 2 : 0);
+	flags |= Lighting.IsLit_Fast(x, y, z) ? LIT_CC : 0;
 
 	/* Use fact Light((Y+1).YMin) == Light(Y.YMax) */
-	offset = (adv_lightFlags >> FACE_YMAX) & 1;
-	flags |= ((y - offset) >= lightHeight ? 4 : 0);
+	offset = (lightFlags >> LIGHT_FLAG_SHADES_FROM_BELOW) & 1;
+	flags |= Lighting.IsLit_Fast(x, (y + 1) - offset, z) ? LIT_P1 : 0;
 
-	/* Dynamic lighting */
-	if (Blocks.FullBright[block])                       flags |= 5;
-	if (Blocks.FullBright[Builder_Chunk[cIndex + 324]]) flags |= 4;
-	if (Blocks.FullBright[Builder_Chunk[cIndex - 324]]) flags |= 1;
+	/* If a block is fullbright, it should also look as if that spot is lit */
+	if (Blocks.FullBright[Builder_Chunk[cIndex - 324]]) flags |= LIT_M1;
+	if (Blocks.FullBright[block])                       flags |= LIT_CC;
+	if (Blocks.FullBright[Builder_Chunk[cIndex + 324]]) flags |= LIT_P1;
+	
 	return flags;
 }
 
@@ -951,7 +957,7 @@ static void Adv_DrawXMin(int count) {
 	PackedCol col1_1 = Builder_FullBright ? white : adv_lerpX[aY1_Z1], col0_1 = Builder_FullBright ? white : adv_lerpX[aY0_Z1];
 	struct VertexTextured* vertices, v;
 
-	if (Builder_Tinted) {
+	if (adv_tinted) {
 		tint   = Blocks.FogCol[Builder_Block];
 		col0_0 = PackedCol_Tint(col0_0, tint); col1_0 = PackedCol_Tint(col1_0, tint);
 		col1_1 = PackedCol_Tint(col1_1, tint); col0_1 = PackedCol_Tint(col0_1, tint);
@@ -993,7 +999,7 @@ static void Adv_DrawXMax(int count) {
 	PackedCol col1_1 = Builder_FullBright ? white : adv_lerpX[aY1_Z1], col0_1 = Builder_FullBright ? white : adv_lerpX[aY0_Z1];
 	struct VertexTextured* vertices, v;
 
-	if (Builder_Tinted) {
+	if (adv_tinted) {
 		tint   = Blocks.FogCol[Builder_Block];
 		col0_0 = PackedCol_Tint(col0_0, tint); col1_0 = PackedCol_Tint(col1_0, tint);
 		col1_1 = PackedCol_Tint(col1_1, tint); col0_1 = PackedCol_Tint(col0_1, tint);
@@ -1035,7 +1041,7 @@ static void Adv_DrawZMin(int count) {
 	PackedCol col1_1 = Builder_FullBright ? white : adv_lerpZ[aX1_Y1], col0_1 = Builder_FullBright ? white : adv_lerpZ[aX0_Y1];
 	struct VertexTextured* vertices, v;
 
-	if (Builder_Tinted) {
+	if (adv_tinted) {
 		tint   = Blocks.FogCol[Builder_Block];
 		col0_0 = PackedCol_Tint(col0_0, tint); col1_0 = PackedCol_Tint(col1_0, tint);
 		col1_1 = PackedCol_Tint(col1_1, tint); col0_1 = PackedCol_Tint(col0_1, tint);
@@ -1077,7 +1083,7 @@ static void Adv_DrawZMax(int count) {
 	PackedCol col0_0 = Builder_FullBright ? white : adv_lerpZ[aX0_Y0], col0_1 = Builder_FullBright ? white : adv_lerpZ[aX0_Y1];
 	struct VertexTextured* vertices, v;
 
-	if (Builder_Tinted) {
+	if (adv_tinted) {
 		tint   = Blocks.FogCol[Builder_Block];
 		col0_0 = PackedCol_Tint(col0_0, tint); col1_0 = PackedCol_Tint(col1_0, tint);
 		col1_1 = PackedCol_Tint(col1_1, tint); col0_1 = PackedCol_Tint(col0_1, tint);
@@ -1119,7 +1125,7 @@ static void Adv_DrawYMin(int count) {
 	PackedCol col1_0 = Builder_FullBright ? white : adv_lerpY[aX1_Z0], col0_0 = Builder_FullBright ? white : adv_lerpY[aX0_Z0];
 	struct VertexTextured* vertices, v;
 
-	if (Builder_Tinted) {
+	if (adv_tinted) {
 		tint   = Blocks.FogCol[Builder_Block];
 		col0_0 = PackedCol_Tint(col0_0, tint); col1_0 = PackedCol_Tint(col1_0, tint);
 		col1_1 = PackedCol_Tint(col1_1, tint); col0_1 = PackedCol_Tint(col0_1, tint);
@@ -1161,7 +1167,7 @@ static void Adv_DrawYMax(int count) {
 	PackedCol col1_1 = Builder_FullBright ? white : adv_lerp[aX1_Z1], col0_1 = Builder_FullBright ? white : adv_lerp[aX0_Z1];
 	struct VertexTextured* vertices, v;
 
-	if (Builder_Tinted) {
+	if (adv_tinted) {
 		tint   = Blocks.FogCol[Builder_Block];
 		col0_0 = PackedCol_Tint(col0_0, tint); col1_0 = PackedCol_Tint(col1_0, tint);
 		col1_1 = PackedCol_Tint(col1_1, tint); col0_1 = PackedCol_Tint(col0_1, tint);
@@ -1183,16 +1189,13 @@ static void Adv_DrawYMax(int count) {
 	part->fVertices[FACE_YMAX] = vertices;
 }
 
-static void Adv_RenderBlock(int index) {
+static void Adv_RenderBlock(int index, int x, int y, int z) {
 	Vec3 min, max;
 	int count_XMin, count_XMax, count_ZMin;
 	int count_ZMax, count_YMin, count_YMax;
 
 	if (Blocks.Draw[Builder_Block] == DRAW_SPRITE) {
-		Builder_FullBright = Blocks.FullBright[Builder_Block];
-		Builder_Tinted     = Blocks.Tinted[Builder_Block];
-		Builder_DrawSprite();
-		return;
+		Builder_DrawSprite(x, y, z); return;
 	}
 
 	count_XMin = Builder_Counts[index + FACE_XMIN];
@@ -1207,12 +1210,11 @@ static void Adv_RenderBlock(int index) {
 
 	Builder_FullBright = Blocks.FullBright[Builder_Block];
 	adv_baseOffset = (Blocks.Draw[Builder_Block] == DRAW_TRANSLUCENT) * ATLAS1D_MAX_ATLASES;
-	adv_lightFlags = Blocks.LightOffset[Builder_Block];
-	Builder_Tinted = Blocks.Tinted[Builder_Block];
+	adv_tinted     = Blocks.Tinted[Builder_Block];
 
 	min = Blocks.RenderMinBB[Builder_Block]; max = Blocks.RenderMaxBB[Builder_Block];
-	adv_x1 = Builder_X + min.X; adv_y1 = Builder_Y + min.Y; adv_z1 = Builder_Z + min.Z;
-	adv_x2 = Builder_X + max.X; adv_y2 = Builder_Y + max.Y; adv_z2 = Builder_Z + max.Z;
+	adv_x1 = x + min.X; adv_y1 = y + min.Y; adv_z1 = z + min.Z;
+	adv_x2 = x + max.X; adv_y2 = y + max.Y; adv_z2 = z + max.Z;
 
 	adv_minBB = Blocks.MinBB[Builder_Block]; adv_maxBB = Blocks.MaxBB[Builder_Block];
 	adv_minBB.Y = 1.0f - adv_minBB.Y; adv_maxBB.Y = 1.0f - adv_maxBB.Y;
@@ -1225,9 +1227,9 @@ static void Adv_RenderBlock(int index) {
 	if (count_YMax) Adv_DrawYMax(count_YMax);
 }
 
-static void Adv_PreStretchTiles(void) {
+static void Adv_PrePrepareChunk(void) {
 	int i;
-	DefaultPreStretchTiles();
+	DefaultPrePrepateChunk();
 	adv_bitFlags = Builder_BitFlags;
 
 	for (i = 0; i <= 4; i++) {
@@ -1244,7 +1246,7 @@ static void AdvBuilder_SetActive(void) {
 	Builder_StretchX        = Adv_StretchX;
 	Builder_StretchZ        = Adv_StretchZ;
 	Builder_RenderBlock     = Adv_RenderBlock;
-	Builder_PreStretchTiles = Adv_PreStretchTiles;
+	Builder_PrePrepareChunk = Adv_PrePrepareChunk;
 }
 
 

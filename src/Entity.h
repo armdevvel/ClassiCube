@@ -6,7 +6,7 @@
 #include "PackedCol.h"
 #include "String.h"
 /* Represents an in-game entity.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+   Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 struct Model;
 struct IGameComponent;
@@ -31,33 +31,44 @@ extern const char* const ShadowMode_Names[SHADOW_MODE_COUNT];
 
 enum EntityType { ENTITY_TYPE_NONE, ENTITY_TYPE_PLAYER };
 
-#define LOCATIONUPDATE_POS   0x01
-#define LOCATIONUPDATE_PITCH 0x02
-#define LOCATIONUPDATE_YAW   0x04
-#define LOCATIONUPDATE_ROTX  0x08
-#define LOCATIONUPDATE_ROTZ  0x10
+/* Which fields are included/valid in a LocationUpdate */
+#define LU_HAS_POS   0x01
+#define LU_HAS_PITCH 0x02
+#define LU_HAS_YAW   0x04
+#define LU_HAS_ROTX  0x08
+#define LU_HAS_ROTZ  0x10
+
+/* 0-11-00000 How to move the entity when position field is included */
+#define LU_POS_MODEMASK   0x60
+
+/* 0-00-00000 Entity is instantly teleported to update->pos */
+#define LU_POS_ABSOLUTE_INSTANT 0x00
+/* 0-01-00000 Entity is smoothly moved to update->pos */
+#define LU_POS_ABSOLUTE_SMOOTH  0x20
+/* 0-10-00000 Entity is smoothly moved to current position + update->pos */
+#define LU_POS_RELATIVE_SMOOTH  0x40
+/* 0-11-00000 Entity is offset/shifted by update->pos */
+#define LU_POS_RELATIVE_SHIFT   0x60
+
+/* If set, then linearly interpolates between current and new angles */
+/* If not set, then current angles are immediately updated to new angles */
+#define LU_ORI_INTERPOLATE 0x80
+
 /* Represents a location update for an entity. Can be a relative position, full position, and/or an orientation update. */
 struct LocationUpdate {
-	Vec3 Pos;
-	float Pitch, Yaw, RotX, RotZ;
-	cc_uint8 Flags;
-	cc_bool RelativePos;
+	Vec3 pos;
+	float pitch, yaw, rotX, rotZ;
+	cc_uint8 flags;
 };
 
-/* Clamps the given angle so it lies between [0, 360). */
-float LocationUpdate_Clamp(float degrees);
-/* Makes a location update only containing yaw and pitch. */
-void LocationUpdate_MakeOri(struct LocationUpdate* update, float yaw, float pitch);
-/* Makes a location update only containing position */
-void LocationUpdate_MakePos(struct LocationUpdate* update, Vec3 pos, cc_bool rel);
-/* Makes a location update containing position, yaw and pitch. */
-void LocationUpdate_MakePosAndOri(struct LocationUpdate* update, Vec3 pos, float yaw, float pitch, cc_bool rel);
+/* Represents a position and orientation state */
+struct EntityLocation { Vec3 pos; float pitch, yaw, rotX, rotY, rotZ; };
 
 struct Entity;
 struct EntityVTABLE {
 	void (*Tick)(struct Entity* e, double delta);
 	void (*Despawn)(struct Entity* e);
-	void (*SetLocation)(struct Entity* e, struct LocationUpdate* update, cc_bool interpolate);
+	void (*SetLocation)(struct Entity* e, struct LocationUpdate* update);
 	PackedCol (*GetCol)(struct Entity* e);
 	void (*RenderModel)(struct Entity* e, double deltaTime, float t);
 	void (*RenderName)(struct Entity* e);
@@ -95,6 +106,10 @@ struct Entity {
 	char SkinRaw[STRING_SIZE];
 	char NameRaw[STRING_SIZE];
 	struct Texture NameTex;
+
+	/* Previous and next intended location of the entity */
+	/*  Current state is linearly interpolated between prev and next */
+	struct EntityLocation prev, next;
 };
 typedef cc_bool (*Entity_TouchesCondition)(BlockID block);
 
@@ -117,7 +132,7 @@ CC_API void Entity_SetModel(struct Entity* e, const cc_string* model);
 /* Entity_SetModel already calls this method. */
 void Entity_UpdateModelBounds(struct Entity* e);
 
-/* Whether the given entity is touching any blocks meeting the given condition .*/
+/* Whether the given entity is touching any blocks meeting the given condition */
 CC_API cc_bool Entity_TouchesAny(struct AABB* bb, Entity_TouchesCondition cond);
 cc_bool Entity_TouchesAnyRope(struct Entity* e);
 cc_bool Entity_TouchesAnyLava(struct Entity* e);
@@ -127,6 +142,7 @@ cc_bool Entity_TouchesAnyWater(struct Entity* e);
 void Entity_SetName(struct Entity* e, const cc_string* name);
 /* Sets the skin name of the given entity. */
 void Entity_SetSkin(struct Entity* e, const cc_string* skin);
+void Entity_LerpAngles(struct Entity* e, float t);
 
 /* Global data for all entities */
 /* (Actual entities may point to NetPlayers_List or elsewhere) */
@@ -135,17 +151,17 @@ CC_VAR extern struct _EntitiesData {
 	cc_uint8 NamesMode, ShadowsMode;
 } Entities;
 
-/* Ticks all entities. */
+/* Ticks all entities */
 void Entities_Tick(struct ScheduledTask* task);
-/* Renders all entities. */
+/* Renders all entities */
 void Entities_RenderModels(double delta, float t);
-/* Renders the name tags of entities, depending on Entities.NamesMode. */
+/* Renders the name tags of entities, depending on Entities.NamesMode */
 void Entities_RenderNames(void);
-/* Renders hovered entity name tags. (these appears through blocks) */
+/* Renders hovered entity name tags (these appears through blocks) */
 void Entities_RenderHoveredNames(void);
-/* Removes the given entity, raising EntityEvents.Removed event. */
+/* Removes the given entity, raising EntityEvents.Removed event */
 void Entities_Remove(EntityID id);
-/* Gets the ID of the closest entity to the given entity. */
+/* Gets the ID of the closest entity to the given entity */
 EntityID Entities_GetClosest(struct Entity* src);
 /* Draws shadows under entities, depending on Entities.ShadowsMode */
 void Entities_DrawShadows(void);
@@ -153,27 +169,35 @@ void Entities_DrawShadows(void);
 #define TABLIST_MAX_NAMES 256
 /* Data for all entries in tab list */
 CC_VAR extern struct _TabListData {
-	/* Buffer indices for player/list/group names. */
-	/* Use TabList_UNSAFE_GetPlayer/List/Group to get these names. */
-	/* NOTE: An Offset of 0 means the entry is unused. */
+	/* Buffer indices for player/list/group names */
+	/* Use TabList_UNSAFE_GetPlayer/List/Group to get these names */
+	/* NOTE: An Offset of 0 means the entry is unused */
 	cc_uint16 NameOffsets[TABLIST_MAX_NAMES];
-	/* Position/Order of this entry within the group. */
+	/* Position/Order of this entry within the group */
 	cc_uint8  GroupRanks[TABLIST_MAX_NAMES];
 	struct StringsBuffer _buffer;
+	/* Whether the tablist entry is automatically removed */
+	/*  when the entity with the same ID is removed */
+	cc_uint8 _entityLinked[TABLIST_MAX_NAMES >> 3];
 } TabList;
 
-/* Removes the tab list entry with the given ID, raising TabListEvents.Removed event. */
+/* Removes the tab list entry with the given ID, raising TabListEvents.Removed event */
 CC_API void TabList_Remove(EntityID id);
-/* Sets the data for the tab list entry with the given id. */
-/* Raises TabListEvents.Changed if replacing, TabListEvents.Added if a new entry. */
+/* Sets the data for the tab list entry with the given id */
+/* Raises TabListEvents.Changed if replacing, TabListEvents.Added if a new entry */
 CC_API void TabList_Set(EntityID id, const cc_string* player, const cc_string* list, const cc_string* group, cc_uint8 rank);
 
 /* Raw unformatted name (for Tab name auto complete) */
-#define TabList_UNSAFE_GetPlayer(id) StringsBuffer_UNSAFE_Get(&TabList._buffer, TabList.NameOffsets[id] - 3);
-/* Formatted name for display in tab list. */
-#define TabList_UNSAFE_GetList(id)   StringsBuffer_UNSAFE_Get(&TabList._buffer, TabList.NameOffsets[id] - 2);
+#define TabList_UNSAFE_GetPlayer(id) StringsBuffer_UNSAFE_Get(&TabList._buffer, TabList.NameOffsets[id] - 3)
+/* Formatted name for display in tab list */
+#define TabList_UNSAFE_GetList(id)   StringsBuffer_UNSAFE_Get(&TabList._buffer, TabList.NameOffsets[id] - 2)
 /* Name of the group this entry is in (e.g. rank name, map name) */
-#define TabList_UNSAFE_GetGroup(id)  StringsBuffer_UNSAFE_Get(&TabList._buffer, TabList.NameOffsets[id] - 1);
+#define TabList_UNSAFE_GetGroup(id)  StringsBuffer_UNSAFE_Get(&TabList._buffer, TabList.NameOffsets[id] - 1)
+
+#define TabList_EntityLinked_Get(id)   (TabList._entityLinked[id >> 3] & (1 << (id & 0x7)))
+#define TabList_EntityLinked_Set(id)   (TabList._entityLinked[id >> 3] |=  (cc_uint8)(1 << (id & 0x7)))
+#define TabList_EntityLinked_Reset(id) (TabList._entityLinked[id >> 3] &= (cc_uint8)~(1 << (id & 0x7)))
+
 
 /* Represents another entity in multiplayer */
 struct NetPlayer {
@@ -212,6 +236,7 @@ void LocalPlayer_ResetJumpVelocity(void);
 cc_bool LocalPlayer_CheckCanZoom(void);
 /* Moves local player back to spawn point. */
 void LocalPlayer_MoveToSpawn(void);
+void LocalPlayer_CalcDefaultSpawn(void);
 
 cc_bool LocalPlayer_HandleRespawn(void);
 cc_bool LocalPlayer_HandleSetSpawn(void);

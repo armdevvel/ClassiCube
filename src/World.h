@@ -2,9 +2,9 @@
 #define CC_WORLD_H
 #include "Vectors.h"
 #include "PackedCol.h"
-/* Represents a fixed size 3D array of blocks.
-   Also contains associated environment metadata.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+/* 
+Represents a fixed size 3D array of blocks and associated metadata
+Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 struct AABB;
 extern struct IGameComponent World_Component;
@@ -14,6 +14,10 @@ extern struct IGameComponent World_Component;
 /* Packs an x,y,z into a single index */
 #define World_Pack(x, y, z) (((y) * World.Length + (z)) * World.Width + (x))
 #define WORLD_UUID_LEN 16
+
+#define World_ChunkPack(cx, cy, cz) (((cz) * World.ChunksY + (cy)) * World.ChunksX + (cx))
+/* TODO: Swap Y and Z? Make sure to update MapRenderer's ResetChunkCache and ClearChunkCache methods! */
+
 
 CC_VAR extern struct _WorldData {
 	/* The blocks in the world. */
@@ -46,6 +50,14 @@ CC_VAR extern struct _WorldData {
 	cc_bool Loaded;
 	/* Point in time the current world was last saved at */
 	double LastSave;
+	/* Default name of the world when saving */
+	cc_string Name;
+	/* Number of chunks on each axis the world is subdivided into */
+	int ChunksX, ChunksY, ChunksZ;
+	/* Number of chunks in the world, or ChunksX * ChunksY * ChunksZ */
+	int ChunksCount;
+	/* Seed world was generated with. May be 0 (unknown) */
+	int Seed;
 } World;
 
 /* Frees the blocks array, sets dimensions to 0, resets environment to default. */
@@ -65,14 +77,17 @@ void World_OutOfMemory(void);
 /* Sets World.Blocks2 and updates internal state for more than 256 blocks. */
 void World_SetMapUpper(BlockRaw* blocks);
 
+#define World_GetRawBlock(idx) ((World.Blocks[idx] | (World.Blocks2[idx] << 8)) & World.IDMask)
+
 /* Gets the block at the given coordinates. */
 /* NOTE: Does NOT check that the coordinates are inside the map. */
 static CC_INLINE BlockID World_GetBlock(int x, int y, int z) {
 	int i = World_Pack(x, y, z);
-	return (BlockID)((World.Blocks[i] | (World.Blocks2[i] << 8)) & World.IDMask);
+	return (BlockID)World_GetRawBlock(i);
 }
 #else
-#define World_GetBlock(x, y, z) World_Blocks[World_Pack(x, y, z)]
+#define World_GetBlock(x, y, z) World.Blocks[World_Pack(x, y, z)]
+#define World_GetRawBlock(idx)  World.Blocks[idx]
 #endif
 
 /* If Y is above the map, returns BLOCK_AIR. */
@@ -102,8 +117,8 @@ enum EnvVar {
 	ENV_VAR_EDGE_BLOCK, ENV_VAR_SIDES_BLOCK, ENV_VAR_EDGE_HEIGHT, ENV_VAR_SIDES_OFFSET,
 	ENV_VAR_CLOUDS_HEIGHT, ENV_VAR_CLOUDS_SPEED, ENV_VAR_WEATHER_SPEED, ENV_VAR_WEATHER_FADE,
 	ENV_VAR_WEATHER, ENV_VAR_EXP_FOG, ENV_VAR_SKYBOX_HOR_SPEED, ENV_VAR_SKYBOX_VER_SPEED,
-	ENV_VAR_SKY_COL, ENV_VAR_CLOUDS_COL, ENV_VAR_FOG_COL, ENV_VAR_SUN_COL, ENV_VAR_SHADOW_COL, 
-	ENV_VAR_SKYBOX_COL
+	ENV_VAR_SKY_COLOR, ENV_VAR_CLOUDS_COLOR, ENV_VAR_FOG_COLOR, 
+	ENV_VAR_SUN_COLOR, ENV_VAR_SHADOW_COLOR, ENV_VAR_SKYBOX_COLOR
 };
 
 CC_VAR extern struct _EnvData {
@@ -125,12 +140,12 @@ CC_VAR extern struct _EnvData {
 enum Weather_ { WEATHER_SUNNY, WEATHER_RAINY, WEATHER_SNOWY };
 extern const char* const Weather_Names[3];
 
-#define ENV_DEFAULT_SKY_COL    PackedCol_Make(0x99, 0xCC, 0xFF, 0xFF)
-#define ENV_DEFAULT_FOG_COL    PackedCol_Make(0xFF, 0xFF, 0xFF, 0xFF)
-#define ENV_DEFAULT_CLOUDS_COL PackedCol_Make(0xFF, 0xFF, 0xFF, 0xFF)
-#define ENV_DEFAULT_SKYBOX_COL PackedCol_Make(0xFF, 0xFF, 0xFF, 0xFF)
-#define ENV_DEFAULT_SUN_COL    PackedCol_Make(0xFF, 0xFF, 0xFF, 0xFF)
-#define ENV_DEFAULT_SHADOW_COL PackedCol_Make(0x9B, 0x9B, 0x9B, 0xFF)
+#define ENV_DEFAULT_SKY_COLOR    PackedCol_Make(0x99, 0xCC, 0xFF, 0xFF)
+#define ENV_DEFAULT_FOG_COLOR    PackedCol_Make(0xFF, 0xFF, 0xFF, 0xFF)
+#define ENV_DEFAULT_CLOUDS_COLOR PackedCol_Make(0xFF, 0xFF, 0xFF, 0xFF)
+#define ENV_DEFAULT_SKYBOX_COLOR PackedCol_Make(0xFF, 0xFF, 0xFF, 0xFF)
+#define ENV_DEFAULT_SUN_COLOR    PackedCol_Make(0xFF, 0xFF, 0xFF, 0xFF)
+#define ENV_DEFAULT_SHADOW_COLOR PackedCol_Make(0x9B, 0x9B, 0x9B, 0xFF)
 
 /* Resets all environment settings to default. */
 /* NOTE: Unlike Env_Set functions, DOES NOT raise EnvVarChanged event. */
@@ -168,20 +183,20 @@ CC_API void Env_SetSkyboxHorSpeed(float speed);
 CC_API void Env_SetSkyboxVerSpeed(float speed);
 
 /* Sets colour of the sky above clouds. (default #99CCFF) */
-CC_API void Env_SetSkyCol(PackedCol col);
+CC_API void Env_SetSkyCol(PackedCol color);
 /* Sets base colour of the horizon fog. (default #FFFFFF) */
 /* Actual fog colour is blended between sky and fog colours, based on view distance. */
-CC_API void Env_SetFogCol(PackedCol col);
+CC_API void Env_SetFogCol(PackedCol color);
 /* Sets colour of clouds. (default #FFFFFF) */
-CC_API void Env_SetCloudsCol(PackedCol col);
+CC_API void Env_SetCloudsCol(PackedCol color);
 /* Sets colour of the skybox. (default #FFFFFF) */
-CC_API void Env_SetSkyboxCol(PackedCol col);
+CC_API void Env_SetSkyboxCol(PackedCol color);
 /* Sets colour of sunlight. (default #FFFFFF) */
 /* This is the colour used for lighting when not underground. */
-CC_API void Env_SetSunCol(PackedCol col);
+CC_API void Env_SetSunCol(PackedCol color);
 /* Sets colour of shadow. (default #9B9B9B) */
 /* This is the colour used for lighting when underground. */
-CC_API void Env_SetShadowCol(PackedCol col);
+CC_API void Env_SetShadowCol(PackedCol color);
 
 #define RESPAWN_NOT_FOUND -100000.0f
 /* Finds the highest Y coordinate of any solid block that intersects the given bounding box */

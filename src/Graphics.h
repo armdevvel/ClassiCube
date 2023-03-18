@@ -2,9 +2,9 @@
 #define CC_GFXAPI_H
 #include "Vectors.h"
 #include "PackedCol.h"
-
-/* Abstracts a 3D graphics rendering API.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+/* 
+Abstracts a 3D graphics rendering API
+Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 struct Bitmap;
 struct Stream;
@@ -50,29 +50,39 @@ CC_VAR extern struct _GfxData {
 
 extern GfxResourceID Gfx_defaultIb;
 extern GfxResourceID Gfx_quadVb, Gfx_texVb;
+extern const cc_string Gfx_LowPerfMessage;
 
 #define ICOUNT(verticesCount) (((verticesCount) >> 2) * 6)
 #define GFX_MAX_INDICES (65536 / 4 * 6)
 #define GFX_MAX_VERTICES 65536
 
+/* Texture should persist across gfx context loss (if backend supports ManagedTextures) */
+#define TEXTURE_FLAG_MANAGED 0x01
+/* Texture should allow updating via Gfx_UpdateTexture */
+#define TEXTURE_FLAG_DYNAMIC 0x02
+
+#define LOWPERF_EXIT_MESSAGE  "&eExited reduced performance mode"
+
 void Gfx_RecreateDynamicVb(GfxResourceID* vb, VertexFormat fmt, int maxVertices);
-void Gfx_RecreateTexture(GfxResourceID* tex, struct Bitmap* bmp, cc_bool managedPool, cc_bool mipmaps);
+void Gfx_RecreateTexture(GfxResourceID* tex, struct Bitmap* bmp, cc_uint8 flags, cc_bool mipmaps);
 void* Gfx_RecreateAndLockVb(GfxResourceID* vb, VertexFormat fmt, int count);
 
 /* Creates a new texture. (and also generates mipmaps if mipmaps) */
+/* Supported flags: TEXTURE_FLAG_MANAGED, TEXTURE_FLAG_DYNAMIC */
 /* NOTE: Only set mipmaps to true if Gfx_Mipmaps is also true, because whether textures
 use mipmapping may be either a per-texture or global state depending on the backend. */
-CC_API GfxResourceID Gfx_CreateTexture(struct Bitmap* bmp, cc_bool managedPool, cc_bool mipmaps);
+CC_API GfxResourceID Gfx_CreateTexture(struct Bitmap* bmp, cc_uint8 flags, cc_bool mipmaps);
 /* Updates a region of the given texture. (and mipmapped regions if mipmaps) */
-CC_API void Gfx_UpdateTexturePart(GfxResourceID texId, int x, int y, struct Bitmap* part, cc_bool mipmaps); /* OBSOLETE */
+CC_API void Gfx_UpdateTexturePart(GfxResourceID texId, int x, int y, struct Bitmap* part, cc_bool mipmaps);
 /* Updates a region of the given texture. (and mipmapped regions if mipmaps) */
-/* NOTE: rowWidth is in pixels (so for normal bitmaps, rowWidth equals width) */
-CC_API void Gfx_UpdateTexture(GfxResourceID texId, int x, int y, struct Bitmap* part, int rowWidth, cc_bool mipmaps);
+/* NOTE: rowWidth is in pixels (so for normal bitmaps, rowWidth equals width) */ /* OBSOLETE */
+void Gfx_UpdateTexture(GfxResourceID texId, int x, int y, struct Bitmap* part, int rowWidth, cc_bool mipmaps);
 /* Sets the currently active texture. */
 CC_API void Gfx_BindTexture(GfxResourceID texId);
 /* Deletes the given texture, then sets it to 0. */
 CC_API void Gfx_DeleteTexture(GfxResourceID* texId);
-/* Sets whether texture colour is used when rendering vertices. */
+/* NOTE: Completely useless now, and does nothing in all graphics backends */
+/*  (used to set whether texture colour is used when rendering vertices) */
 CC_API void Gfx_SetTexturing(cc_bool enabled);
 /* Turns on mipmapping. (if Gfx_Mipmaps is enabled) */
 /* NOTE: You must have created textures with mipmaps true for this to work. */
@@ -113,6 +123,9 @@ CC_API void Gfx_SetDepthTest(cc_bool enabled);
 CC_API void Gfx_SetColWriteMask(cc_bool r, cc_bool g, cc_bool b, cc_bool a);
 /* Sets whether z/depth of pixels is actually written to the depth buffer. */
 CC_API void Gfx_SetDepthWrite(cc_bool enabled);
+/* Sets whether the game should only write output to depth buffer */
+/*  NOTE: Implicitly calls Gfx_SetColWriteMask */
+CC_API void Gfx_DepthOnlyRendering(cc_bool depthOnly);
 
 /* Creates a new index buffer and fills out its contents. */
 CC_API GfxResourceID Gfx_CreateIb(void* indices, int indicesCount);
@@ -138,10 +151,10 @@ CC_API void  Gfx_UnlockVb(GfxResourceID vb);
 GfxResourceID Gfx_CreateVb2(void* vertices, VertexFormat fmt, int count);
 #endif
 #ifdef CC_BUILD_GLMODERN
-/* Special case Gfx_BindVb for map renderer */
-void Gfx_BindVb_T2fC4b(GfxResourceID vb);
+/* Special case Gfx_BindVb for use with Gfx_DrawIndexedTris_T2fC4b */
+void Gfx_BindVb_Textured(GfxResourceID vb);
 #else
-#define Gfx_BindVb_T2fC4b Gfx_BindVb
+#define Gfx_BindVb_Textured Gfx_BindVb
 #endif
 
 /* Creates a new dynamic vertex buffer, whose contents can be updated later. */
@@ -217,13 +230,13 @@ cc_bool Gfx_TryRestoreContext(void);
 void Gfx_UpdateDynamicVb_IndexedTris(GfxResourceID vb, void* vertices, int vCount);
 
 /* Renders a 2D flat coloured rectangle. */
-void Gfx_Draw2DFlat(int x, int y, int width, int height, PackedCol col);
+void Gfx_Draw2DFlat(int x, int y, int width, int height, PackedCol color);
 /* Renders a 2D flat vertical gradient rectangle. */
 void Gfx_Draw2DGradient(int x, int y, int width, int height, PackedCol top, PackedCol bottom);
 /* Renders a 2D coloured texture. */
-void Gfx_Draw2DTexture(const struct Texture* tex, PackedCol col);
+void Gfx_Draw2DTexture(const struct Texture* tex, PackedCol color);
 /* Fills out the vertices for rendering a 2D coloured texture. */
-void Gfx_Make2DQuad(const struct Texture* tex, PackedCol col, struct VertexTextured** vertices);
+void Gfx_Make2DQuad(const struct Texture* tex, PackedCol color, struct VertexTextured** vertices);
 
 /* Switches state to be suitable for drawing 2D graphics. */
 /* NOTE: This means turning off fog/depth test, changing matrices, etc.*/
@@ -250,5 +263,5 @@ void Gfx_RestoreAlphaState(cc_uint8 draw);
 /* Binds then renders the given texture. */
 void Texture_Render(const struct Texture* tex);
 /* Binds then renders the given texture. */
-void Texture_RenderShaded(const struct Texture* tex, PackedCol shadeCol);
+void Texture_RenderShaded(const struct Texture* tex, PackedCol shadeColor);
 #endif

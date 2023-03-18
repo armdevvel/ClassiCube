@@ -1,26 +1,27 @@
 #ifndef CC_CONSTANTS_H
 #define CC_CONSTANTS_H
-/* Defines useful constants.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+/* 
+Defines useful constants
+Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 
 #define GAME_MAX_CMDARGS 5
-#define GAME_APP_VER "1.2.5"
+#define GAME_APP_VER "1.3.5"
 #define GAME_API_VER 1
 
 #if defined CC_BUILD_WEB
-#define GAME_APP_ALT   "ClassiCube 1.2.5 web mobile"
-#define GAME_APP_NAME  "ClassiCube 1.2.5 web"
+#define GAME_APP_ALT   "ClassiCube 1.3.5 web mobile"
+#define GAME_APP_NAME  "ClassiCube 1.3.5 web"
 #define GAME_APP_TITLE "ClassiCube"
-#elif defined CC_BUILD_COCOA
-#define GAME_APP_NAME  "ClassiCube 1.2.5 alpha"
-#define GAME_APP_TITLE "ClassiCube 1.2.5 alpha"
 #elif defined CC_BUILD_ANDROID
-#define GAME_APP_NAME  "ClassiCube 1.2.5 android alpha"
-#define GAME_APP_TITLE "ClassiCube 1.2.5 android alpha"
+#define GAME_APP_NAME  "ClassiCube 1.3.5 android alpha"
+#define GAME_APP_TITLE "ClassiCube 1.3.5 android alpha"
+#elif defined CC_BUILD_IOS
+#define GAME_APP_NAME  "ClassiCube 1.3.5 iOS alpha"
+#define GAME_APP_TITLE "ClassiCube 1.3.5 iOS alpha"
 #else
-#define GAME_APP_NAME  "ClassiCube 1.2.5"
-#define GAME_APP_TITLE "ClassiCube 1.2.5"
+#define GAME_APP_NAME  "ClassiCube 1.3.5"
+#define GAME_APP_TITLE "ClassiCube 1.3.5"
 #endif
 
 /* Max number of characters strings can have. */
@@ -51,6 +52,8 @@
 #define GAME_DEF_TICKS (1.0 / 20)
 #define GAME_NET_TICKS (1.0 / 60)
 
+#define GUI_MAX_CHATLINES 30
+
 enum FACE_CONSTS {
 	FACE_XMIN = 0, /* Face X = 0 */
 	FACE_XMAX = 1, /* Face X = 1 */
@@ -62,7 +65,7 @@ enum FACE_CONSTS {
 };
 
 enum SKIN_TYPE { SKIN_64x32, SKIN_64x64, SKIN_64x64_SLIM, SKIN_INVALID = 0xF0 };
-#define DRAWER2D_MAX_COLS 256
+#define DRAWER2D_MAX_COLORS 256
 
 #define UInt8_MaxValue  ((cc_uint8)255)
 #define Int16_MaxValue  ((cc_int16)32767)
@@ -71,9 +74,12 @@ enum SKIN_TYPE { SKIN_64x32, SKIN_64x64, SKIN_64x64_SLIM, SKIN_INVALID = 0xF0 };
 #define Int32_MaxValue  ((cc_int32)2147483647L)
 
 /* Skins were moved to use Amazon S3, so link directly to avoid a pointless redirect */
-#define SKINS_SERVER    "http://classicube.s3.amazonaws.com/skin"
+#define SKINS_SERVER    "http://cdn.classicube.net/skin"
 #define UPDATES_SERVER  "http://cs.classicube.net/client"
 #define SERVICES_SERVER "https://www.classicube.net/api"
 #define RESOURCE_SERVER "http://static.classicube.net"
+/* Webpage where users can register for a new account */
 #define REGISTERNEW_URL "https://www.classicube.net/acc/register/"
+
+#define DEFAULT_USERNAME "Singleplayer"
 #endif

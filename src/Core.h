@@ -1,7 +1,8 @@
 #ifndef CC_CORE_H
 #define CC_CORE_H
-/* Core fixed-size integer types, automatic platform detection, and common small structs.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+/* 
+Core fixed-size integer types, automatic platform detection, and common small structs
+Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 
 #if _MSC_VER
@@ -148,17 +149,18 @@ typedef struct cc_string_ {
 Thus it is **NOT SAFE** to allocate a string on the stack. */
 #define STRING_REF
 
+#define CC_BUILD_FREETYPE
 /*#define CC_BUILD_GL11*/
 #ifndef CC_BUILD_MANUAL
 #if defined _WIN32
 #define CC_BUILD_WIN
 #define CC_BUILD_D3D9
 #define CC_BUILD_WINGUI
-#define CC_BUILD_WGL
 #define CC_BUILD_WININET
 #define CC_BUILD_WINMM
 #elif defined __ANDROID__
 #define CC_BUILD_ANDROID
+#define CC_BUILD_MOBILE
 #define CC_BUILD_POSIX
 #define CC_BUILD_GL
 #define CC_BUILD_GLMODERN
@@ -166,6 +168,18 @@ Thus it is **NOT SAFE** to allocate a string on the stack. */
 #define CC_BUILD_EGL
 #define CC_BUILD_TOUCH
 #define CC_BUILD_OPENSLES
+#elif defined __serenity__
+#define CC_BUILD_SERENITY
+#define CC_BUILD_POSIX
+#define CC_BUILD_GL
+#define CC_BUILD_SDL
+#define CC_BUILD_CURL
+#define CC_BUILD_OPENAL
+#elif defined __psp__
+#define CC_BUILD_POSIX
+#define CC_BUILD_CURL
+#define CC_BUILD_OPENAL
+#define CC_BUILD_PSP
 #elif defined __linux__
 #define CC_BUILD_LINUX
 #define CC_BUILD_POSIX
@@ -183,17 +197,21 @@ Thus it is **NOT SAFE** to allocate a string on the stack. */
 #define CC_BUILD_POSIX
 #define CC_BUILD_GL
 #if defined __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__
+#define CC_BUILD_MOBILE
 #define CC_BUILD_GLES
 #define CC_BUILD_GLMODERN
 #define CC_BUILD_IOS
-#elif defined __x86_64__
+#define CC_BUILD_TOUCH
+#define CC_BUILD_CFNETWORK
+#elif defined __x86_64__ || defined __arm64__
 #define CC_BUILD_COCOA
 #define CC_BUILD_MACOS
+#define CC_BUILD_CURL
 #else
 #define CC_BUILD_CARBON
 #define CC_BUILD_MACOS
-#endif
 #define CC_BUILD_CURL
+#endif
 #define CC_BUILD_OPENAL
 #elif defined __sun__
 #define CC_BUILD_SOLARIS
@@ -232,19 +250,20 @@ Thus it is **NOT SAFE** to allocate a string on the stack. */
 #define CC_BUILD_GL
 #define CC_BUILD_CURL
 #define CC_BUILD_OPENAL
-#define CC_BUILD_SDL
 #elif defined __EMSCRIPTEN__
 #define CC_BUILD_WEB
 #define CC_BUILD_GL
 #define CC_BUILD_GLMODERN
 #define CC_BUILD_GLES
 #define CC_BUILD_TOUCH
-#define CC_BUILD_NOAUDIO
+#define CC_BUILD_WEBAUDIO
+#define CC_BUILD_NOMUSIC
 #define CC_BUILD_MINFILES
+#undef  CC_BUILD_FREETYPE
 #endif
 #endif
 
-#ifdef CC_BUILD_D3D9
+#if defined CC_BUILD_D3D9 || defined CC_BUILD_D3D11
 typedef void* GfxResourceID;
 #else
 /* Ensure size is same as D3D9, even though only 32 bits are used */

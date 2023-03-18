@@ -16,6 +16,7 @@
 #include "Menus.h"
 #include "Funcs.h"
 #include "Server.h"
+#include "TexturePack.h"
 
 struct _GuiData Gui;
 struct Screen* Gui_Screens[GUI_MAX_SCREENS];
@@ -26,8 +27,16 @@ static cc_uint8 priorities[GUI_MAX_SCREENS];
 *----------------------------------------------------------Gui------------------------------------------------------------*
 *#########################################################################################################################*/
 static CC_NOINLINE int GetWindowScale(void) {
-	float windowScale = min(WindowInfo.Width / 640.0f, WindowInfo.Height / 480.0f);
-	return 1 + (int)windowScale;
+	float widthScale  = WindowInfo.Width  / 640.0f;
+	float heightScale = WindowInfo.Height / 480.0f;
+
+	/* Use larger UI scaling on mobile */
+	/* TODO move this DPI scaling elsewhere.,. */
+	if (!Input_TouchMode) {
+		widthScale  /= DisplayInfo.ScaleX;
+		heightScale /= DisplayInfo.ScaleY;
+	}
+	return 1 + (int)(min(widthScale, heightScale));
 }
 
 float Gui_Scale(float value) {
@@ -46,8 +55,8 @@ float Gui_GetChatScale(void) {
 	return Gui_Scale(GetWindowScale() * Gui.RawChatScale);
 }
 
-void Gui_MakeTitleFont(struct FontDesc* font) { Drawer2D_MakeFont(font, 16, FONT_FLAGS_BOLD); }
-void Gui_MakeBodyFont(struct FontDesc* font)  { Drawer2D_MakeFont(font, 16, FONT_FLAGS_NONE); }
+void Gui_MakeTitleFont(struct FontDesc* font) { Font_Make(font, 16, FONT_FLAGS_BOLD); }
+void Gui_MakeBodyFont(struct FontDesc* font)  { Font_Make(font, 16, FONT_FLAGS_NONE); }
 
 int Gui_CalcPos(cc_uint8 anchor, int offset, int size, int axisLen) {
 	if (anchor == ANCHOR_MIN) return offset;
@@ -82,15 +91,16 @@ void Gui_ShowDefault(void) {
 
 static void LoadOptions(void) {
 	Gui.DefaultLines    = Game_ClassicMode ? 10 : 12;
-	Gui.Chatlines       = Options_GetInt(OPT_CHATLINES, 0, 30, Gui.DefaultLines);
+	Gui.Chatlines       = Options_GetInt(OPT_CHATLINES, 0, GUI_MAX_CHATLINES, Gui.DefaultLines);
 	Gui.ClickableChat   = !Game_ClassicMode && Options_GetBool(OPT_CLICKABLE_CHAT,   !Input_TouchMode);
 	Gui.TabAutocomplete = !Game_ClassicMode && Options_GetBool(OPT_TAB_AUTOCOMPLETE, true);
 
-	Gui.ClassicTexture = Options_GetBool(OPT_CLASSIC_GUI, true)      || Game_ClassicMode;
-	Gui.ClassicTabList = Options_GetBool(OPT_CLASSIC_TABLIST, false) || Game_ClassicMode;
-	Gui.ClassicMenu    = Options_GetBool(OPT_CLASSIC_OPTIONS, false) || Game_ClassicMode;
-	Gui.ClassicChat    = Options_GetBool(OPT_CLASSIC_CHAT, false)    || Game_PureClassic;
-	Gui.ShowFPS        = Options_GetBool(OPT_SHOW_FPS, true);
+	Gui.ClassicTexture   = Options_GetBool(OPT_CLASSIC_GUI,        true) || Game_ClassicMode;
+	Gui.ClassicTabList   = Options_GetBool(OPT_CLASSIC_TABLIST,   false) || Game_ClassicMode;
+	Gui.ClassicMenu      = Options_GetBool(OPT_CLASSIC_OPTIONS,   false) || Game_ClassicMode;
+	Gui.ClassicChat      = Options_GetBool(OPT_CLASSIC_CHAT,      false) || Game_PureClassic;
+	Gui.ClassicInventory = Options_GetBool(OPT_CLASSIC_INVENTORY, false) || Game_ClassicMode;
+	Gui.ShowFPS          = Options_GetBool(OPT_SHOW_FPS, true);
 	
 	Gui.RawInventoryScale = Options_GetFloat(OPT_INVENTORY_SCALE, 0.25f, 5.0f, 1.0f);
 	Gui.RawHotbarScale    = Options_GetFloat(OPT_HOTBAR_SCALE,    0.25f, 5.0f, 1.0f);
@@ -135,10 +145,6 @@ void Gui_RefreshAll(void) {
 	LoseAllScreens();
 	OnContextRecreated(NULL);
 	OnResize(NULL);
-}
-
-void Gui_RemoveAll(void) {
-	while (Gui.ScreensCount) Gui_Remove(Gui_Screens[0]);
 }
 
 void Gui_Refresh(struct Screen* s) {
@@ -280,8 +286,8 @@ void Gui_RenderGui(double delta) {
 *#########################################################################################################################*/
 void TextAtlas_Make(struct TextAtlas* atlas, const cc_string* chars, struct FontDesc* font, const cc_string* prefix) {
 	struct DrawTextArgs args; 
+	struct Context2D ctx;
 	int width, height;
-	struct Bitmap bmp;
 	int i, charWidth;
 
 	Gfx_DeleteTexture(&atlas->tex.ID);
@@ -300,20 +306,20 @@ void TextAtlas_Make(struct TextAtlas* atlas, const cc_string* chars, struct Font
 	}
 	height = Drawer2D_TextHeight(&args);
 
-	Bitmap_AllocateClearedPow2(&bmp, width, height);
+	Context2D_Alloc(&ctx, width, height);
 	{
 		args.text = *prefix;
-		Drawer2D_DrawText(&bmp, &args, 0, 0);	
+		Context2D_DrawText(&ctx, &args, 0, 0);
 
 		for (i = 0; i < chars->length; i++) {
 			args.text = String_UNSAFE_Substring(chars, i, 1);
-			Drawer2D_DrawText(&bmp, &args, atlas->offsets[i], 0);
+			Context2D_DrawText(&ctx, &args, atlas->offsets[i], 0);
 		}
-		Drawer2D_MakeTexture(&atlas->tex, &bmp, width, height);
+		Context2D_MakeTexture(&atlas->tex, &ctx);
 	}	
-	Mem_Free(bmp.scan0);
+	Context2D_Free(&ctx);
 
-	atlas->uScale = 1.0f / (float)bmp.width;
+	atlas->uScale = 1.0f / (float)ctx.bmp.width;
 	atlas->tex.uv.U2 = atlas->offset * atlas->uScale;
 	atlas->tex.Width = atlas->offset;	
 }
@@ -322,15 +328,14 @@ void TextAtlas_Free(struct TextAtlas* atlas) { Gfx_DeleteTexture(&atlas->tex.ID)
 
 void TextAtlas_Add(struct TextAtlas* atlas, int charI, struct VertexTextured** vertices) {
 	struct Texture part = atlas->tex;
-	int width       = atlas->widths[charI];
-	PackedCol white = PACKEDCOL_WHITE;
+	int width = atlas->widths[charI];
 
 	part.X  = atlas->curX; part.Width = width;
 	part.uv.U1 = atlas->offsets[charI] * atlas->uScale;
 	part.uv.U2 = part.uv.U1 + width    * atlas->uScale;
 
 	atlas->curX += width;	
-	Gfx_Make2DQuad(&part, white, vertices);
+	Gfx_Make2DQuad(&part, PACKEDCOL_WHITE, vertices);
 }
 
 void TextAtlas_AddInt(struct TextAtlas* atlas, int value, struct VertexTextured** vertices) {
@@ -492,27 +497,38 @@ void Screen_PointerUp(void* s, int id, int x, int y) { }
 /*########################################################################################################################*
 *------------------------------------------------------Gui component------------------------------------------------------*
 *#########################################################################################################################*/
+static void GuiPngProcess(struct Stream* stream, const cc_string* name) {
+	Game_UpdateTexture(&Gui.GuiTex, stream, name, NULL);
+}
+static struct TextureEntry gui_entry = { "gui.png", GuiPngProcess };
+
+static void GuiClassicPngProcess(struct Stream* stream, const cc_string* name) {
+	Game_UpdateTexture(&Gui.GuiClassicTex, stream, name, NULL);
+}
+static struct TextureEntry guiClassic_entry = { "gui_classic.png", GuiClassicPngProcess };
+
+static void IconsPngProcess(struct Stream* stream, const cc_string* name) {
+	Game_UpdateTexture(&Gui.IconsTex, stream, name, NULL);
+}
+static struct TextureEntry icons_entry = { "icons.png", IconsPngProcess };
+
+static void TouchPngProcess(struct Stream* stream, const cc_string* name) {
+	Game_UpdateTexture(&Gui.TouchTex, stream, name, NULL);
+}
+static struct TextureEntry touch_entry = { "touch.png", TouchPngProcess };
+
+
 static void OnFontChanged(void* obj) { Gui_RefreshAll(); }
 
-static void OnFileChanged(void* obj, struct Stream* stream, const cc_string* name) {
-	if (String_CaselessEqualsConst(name, "gui.png")) {
-		Game_UpdateTexture(&Gui.GuiTex, stream, name, NULL);
-	} else if (String_CaselessEqualsConst(name, "gui_classic.png")) {
-		Game_UpdateTexture(&Gui.GuiClassicTex, stream, name, NULL);
-	} else if (String_CaselessEqualsConst(name, "icons.png")) {
-		Game_UpdateTexture(&Gui.IconsTex, stream, name, NULL);
-	} else if (String_CaselessEqualsConst(name, "touch.png")) {
-		Game_UpdateTexture(&Gui.TouchTex, stream, name, NULL);
-	}
-}
-
-static void OnKeyPress(void* obj, int keyChar) {
+static void OnKeyPress(void* obj, int cp) {
 	struct Screen* s;
-	int i;
+	int i; 
+	char c;
+	if (!Convert_TryCodepointToCP437(cp, &c)) return;
 
 	for (i = 0; i < Gui.ScreensCount; i++) {
 		s = Gui_Screens[i];
-		if (s->VTABLE->HandlesKeyPress(s, keyChar)) return;
+		if (s->VTABLE->HandlesKeyPress(s, c)) return;
 	}
 }
 
@@ -540,8 +556,12 @@ static void OnContextLost(void* obj) {
 
 static void OnInit(void) {
 	Gui.Screens = Gui_Screens; /* for plugins */
+	TextureEntry_Register(&gui_entry);
+	TextureEntry_Register(&guiClassic_entry);
+	TextureEntry_Register(&icons_entry);
+	TextureEntry_Register(&touch_entry);
+
 	Event_Register_(&ChatEvents.FontChanged,     NULL, OnFontChanged);
-	Event_Register_(&TextureEvents.FileChanged,  NULL, OnFileChanged);
 	Event_Register_(&GfxEvents.ContextLost,      NULL, OnContextLost);
 	Event_Register_(&GfxEvents.ContextRecreated, NULL, OnContextRecreated);
 	Event_Register_(&InputEvents.Press,          NULL, OnKeyPress);
@@ -565,7 +585,8 @@ static void OnReset(void) {
 }
 
 static void OnFree(void) {
-	Gui_RemoveAll();
+	while (Gui.ScreensCount) Gui_Remove(Gui_Screens[0]);
+
 	OnContextLost(NULL);
 	OnReset();
 }

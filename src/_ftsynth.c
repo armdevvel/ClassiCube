@@ -15,13 +15,14 @@
 /*                                                                         */
 /***************************************************************************/
 
-
+#include "Core.h"
+#ifdef CC_BUILD_FREETYPE
 #include "freetype/ft2build.h"
-#include FT_SYNTHESIS_H_FT
-#include FT_INTERNAL_DEBUG_H_FT
-#include FT_INTERNAL_OBJECTS_H_FT
-#include FT_OUTLINE_H_FT
-#include FT_BITMAP_H_FT
+#include "freetype/ftsynth.h"
+#include "freetype/ftdebug.h"
+#include "freetype/ftobjs.h"
+#include "freetype/ftoutln.h"
+#include "freetype/ftbitmap.h"
 
 
   /*************************************************************************/
@@ -118,5 +119,5 @@
       slot->bitmap_top += (FT_Int)( ystr >> 6 );
   }
 
-
+#endif
 /* END */

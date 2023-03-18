@@ -25,7 +25,6 @@ static void HeldBlockRenderer_RenderModel(void) {
 	struct Model* model;
 
 	Gfx_SetFaceCulling(true);
-	Gfx_SetTexturing(true);
 	Gfx_SetDepthTest(false);
 	
 	if (Blocks.Draw[held_block] == DRAW_GAS) {
@@ -44,7 +43,6 @@ static void HeldBlockRenderer_RenderModel(void) {
 		Gfx_RestoreAlphaState(Blocks.Draw[held_block]);
 	}
 	
-	Gfx_SetTexturing(false);
 	Gfx_SetDepthTest(true);
 	Gfx_SetFaceCulling(false);
 }
@@ -143,7 +141,7 @@ static PackedCol HeldBlockRenderer_GetCol(struct Entity* entity) {
 	adjPitch = player->Pitch - 90.0f;
 	if (adjPitch < 0.0f) adjPitch += 360.0f;
 
-	/* Adjust colour so held block is brighter when looking straight up */
+	/* Adjust color so held block is brighter when looking straight up */
 	t     = Math_AbsF(adjPitch - 180.0f) / 180.0f;
 	scale = Math_Lerp(0.9f, 0.7f, t);
 	return PackedCol_Scale(col, scale);

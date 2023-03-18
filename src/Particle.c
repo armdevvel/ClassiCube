@@ -150,7 +150,7 @@ static void RainParticle_Render(struct Particle* p, float t, struct VertexTextur
 	size.X = p->size * 0.015625f; size.Y = size.X;
 
 	x = Math_Floor(pos.X); y = Math_Floor(pos.Y); z = Math_Floor(pos.Z);
-	col = World_Contains(x, y, z) ? Lighting_Col(x, y, z) : Env.SunCol;
+	col = Lighting.Color(x, y, z);
 	Particle_DoRender(&size, &pos, &rain_rec, col, vertices);
 }
 
@@ -209,7 +209,7 @@ static cc_bool TerrainParticle_CanPass(BlockID block) {
 }
 
 static cc_bool TerrainParticle_Tick(struct TerrainParticle* p, double delta) {
-	return PhysicsTick(&p->base, 5.4f, TerrainParticle_CanPass, delta);
+	return PhysicsTick(&p->base, Blocks.ParticleGravity[p->block], TerrainParticle_CanPass, delta);
 }
 
 static void TerrainParticle_Render(struct TerrainParticle* p, float t, struct VertexTextured* vertices) {
@@ -223,7 +223,7 @@ static void TerrainParticle_Render(struct TerrainParticle* p, float t, struct Ve
 	
 	if (!Blocks.FullBright[p->block]) {
 		x = Math_Floor(pos.X); y = Math_Floor(pos.Y); z = Math_Floor(pos.Z);
-		col = World_Contains(x, y, z) ? Lighting_Col_XSide(x, y, z) : Env.SunXSide;
+		col = Lighting.Color_XSide(x, y, z);
 	}
 
 	Block_Tint(col, p->block);
@@ -349,7 +349,7 @@ static void CustomParticle_Render(struct CustomParticle* p, float t, struct Vert
 	size.X = p->base.size; size.Y = size.X;
 
 	x = Math_Floor(pos.X); y = Math_Floor(pos.Y); z = Math_Floor(pos.Z);
-	col = e->fullBright ? PACKEDCOL_WHITE : (World_Contains(x, y, z) ? Lighting_Col(x, y, z) : Env.SunCol);
+	col = e->fullBright ? PACKEDCOL_WHITE : Lighting.Color(x, y, z);
 	col = PackedCol_Tint(col, e->tintCol);
 
 	Particle_DoRender(&size, &pos, &rec, col, vertices);
@@ -396,7 +396,6 @@ void Particles_Render(float t) {
 	if (!terrain_count && !rain_count && !custom_count) return;
 	if (Gfx.LostContext) return;
 
-	Gfx_SetTexturing(true);
 	Gfx_SetAlphaTest(true);
 
 	Gfx_SetVertexFormat(VERTEX_FORMAT_TEXTURED);
@@ -405,7 +404,6 @@ void Particles_Render(float t) {
 	Custom_Render(t);
 
 	Gfx_SetAlphaTest(false);
-	Gfx_SetTexturing(false);
 }
 
 static void Particles_Tick(struct ScheduledTask* task) {
@@ -524,7 +522,7 @@ void Particles_CustomEffect(int effectID, float x, float y, float z, float origi
 	struct CustomParticle* p;
 	struct CustomParticleEffect* e = &Particles_CustomEffects[effectID];
 	int i, count = e->particleCount;
-	Vec3 offset;
+	Vec3 offset, delta;
 	float d;
 
 	for (i = 0; i < count; i++) {
@@ -535,7 +533,7 @@ void Particles_CustomEffect(int effectID, float x, float y, float z, float origi
 		offset.X = Random_Float(&rnd) - 0.5f;
 		offset.Y = Random_Float(&rnd) - 0.5f;
 		offset.Z = Random_Float(&rnd) - 0.5f;
-		Vec3_Normalize(&offset, &offset);
+		Vec3_Normalise(&offset);
 
 		/* See https://karthikkaranth.me/blog/generating-random-points-in-a-sphere/ */
 		/* 'Using normally distributed random numbers' */
@@ -548,19 +546,12 @@ void Particles_CustomEffect(int effectID, float x, float y, float z, float origi
 		p->base.lastPos.Z = z + offset.Z * d;
 		
 		Vec3 origin = { originX, originY, originZ };
-		if (Vec3_Equals(&origin, &p->base.lastPos)) {
-			p->base.velocity.X = 0;
-			p->base.velocity.Y = 0;
-			p->base.velocity.Z = 0;
-		}
-		else {
-			Vec3 diff;
-			Vec3_Sub(&diff, &p->base.lastPos, &origin);
-			Vec3_Normalize(&diff, &diff);
-			p->base.velocity.X = diff.X * e->speed;
-			p->base.velocity.Y = diff.Y * e->speed;
-			p->base.velocity.Z = diff.Z * e->speed;
-		}
+		Vec3_Sub(&delta, &p->base.lastPos, &origin);
+		Vec3_Normalise(&delta);
+
+		p->base.velocity.X = delta.X * e->speed;
+		p->base.velocity.Y = delta.Y * e->speed;
+		p->base.velocity.Z = delta.Z * e->speed;
 
 		p->base.nextPos  = p->base.lastPos;
 		p->base.lifetime = e->baseLifetime + (e->baseLifetime * e->lifetimeVariation) * ((Random_Float(&rnd) - 0.5f) * 2);
@@ -579,6 +570,12 @@ void Particles_CustomEffect(int effectID, float x, float y, float z, float origi
 /*########################################################################################################################*
 *---------------------------------------------------Particles component---------------------------------------------------*
 *#########################################################################################################################*/
+static void ParticlesPngProcess(struct Stream* stream, const cc_string* name) {
+	Game_UpdateTexture(&Particles_TexId, stream, name, NULL);
+}
+static struct TextureEntry particles_entry = { "particles.png", ParticlesPngProcess };
+
+
 static void OnContextLost(void* obj) {
 	Gfx_DeleteDynamicVb(&Particles_VB); 
 
@@ -592,19 +589,13 @@ static void OnBreakBlockEffect_Handler(void* obj, IVec3 coords, BlockID old, Blo
 	Particles_BreakBlockEffect(coords, old, now);
 }
 
-static void OnFileChanged(void* obj, struct Stream* stream, const cc_string* name) {
-	if (String_CaselessEqualsConst(name, "particles.png")) {
-		Game_UpdateTexture(&Particles_TexId, stream, name, NULL);
-	}
-}
-
 static void OnInit(void) {
 	ScheduledTask_Add(GAME_DEF_TICKS, Particles_Tick);
 	Random_SeedFromCurrentTime(&rnd);
-	OnContextRecreated(NULL);	
+	OnContextRecreated(NULL);
+	TextureEntry_Register(&particles_entry);
 
 	Event_Register_(&UserEvents.BlockChanged,    NULL, OnBreakBlockEffect_Handler);
-	Event_Register_(&TextureEvents.FileChanged,  NULL, OnFileChanged);
 	Event_Register_(&GfxEvents.ContextLost,      NULL, OnContextLost);
 	Event_Register_(&GfxEvents.ContextRecreated, NULL, OnContextRecreated);
 }

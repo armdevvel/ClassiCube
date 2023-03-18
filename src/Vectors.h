@@ -2,9 +2,10 @@
 #define CC_VECTORS_H
 #include "Core.h"
 #include "Constants.h"
-/* Represents 2 and 3 component vectors, and 4 x 4 matrix.
-   Frustum culling sourced from http://www.crownandcutlass.com/features/technicaldetails/frustum.html
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+/* 
+Represents 2 and 3 component vectors, and 4 x 4 matrix
+  Frustum culling sourced from http://www.crownandcutlass.com/features/technicaldetails/frustum.html
+Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 
 /* 2 component vector (2D vector) */
@@ -84,7 +85,7 @@ static CC_INLINE void Vec3_Negate(Vec3* result, Vec3* a) {
 /* Linearly interpolates components of two vectors. */
 void Vec3_Lerp(Vec3* result, const Vec3* a, const Vec3* b, float blend);
 /* Scales all components of a vector to lie in [-1, 1] */
-void Vec3_Normalize(Vec3* result, const Vec3* a);
+void Vec3_Normalise(Vec3* v);
 
 /* Transforms a vector by the given matrix. */
 void Vec3_Transform(Vec3* result, const Vec3* a, const struct Matrix* mat);

@@ -74,7 +74,7 @@ static cc_bool IsAllBlack(const struct Bitmap* bmp, int x1, int y1, int width, i
 		BitmapCol* row = Bitmap_GetRow(bmp, y);
 
 		for (x = x1; x < x1 + width; x++) {
-			if (row[x] != BITMAPCOL_BLACK) return false;
+			if (row[x] != BITMAPCOLOR_BLACK) return false;
 		}
 	}
 	return true;
@@ -173,6 +173,7 @@ int Convert_ToBase64(const void* data, int len, char* dst) {
 	return (int)(dst - beg);
 }
 
+/* Maps a base 64 character back into a 6 bit integer */
 CC_NOINLINE static int DecodeBase64(char c) {
 	if (c >= 'A' && c <= 'Z') return (c - 'A');
 	if (c >= 'a' && c <= 'z') return (c - 'a') + 26;
@@ -263,8 +264,8 @@ cc_result EntryList_Load(struct StringsBuffer* list, const char* file, char sepa
 		}
 	}
 
-	res = stream.Close(&stream);
-	if (res) { Logger_SysWarn2(res, "closing", &path); }
+	/* No point logging error for closing readonly file */
+	(void)stream.Close(&stream);
 	return res;
 }
 

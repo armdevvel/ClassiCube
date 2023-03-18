@@ -2,7 +2,7 @@
 #define CC_EVENT_H
 #include "Vectors.h"
 /* Helper methods for using events, and contains all events.
-   Copyright 2014-2021 ClassiCube | Licensed under BSD-3
+   Copyright 2014-2022 ClassiCube | Licensed under BSD-3
 */
 
 /* Max callbacks that can be registered for an event. */
@@ -63,6 +63,13 @@ struct Event_RawMove {
 	void* Objs[EVENT_MAX_CALLBACKS]; int Count;
 };
 
+/* "data" will be 64 bytes in length. */
+typedef void (*Event_PluginMessage_Callback)(void* obj, cc_uint8 channel, cc_uint8* data);
+struct Event_PluginMessage {
+	Event_PluginMessage_Callback Handlers[EVENT_MAX_CALLBACKS]; 
+	void* Objs[EVENT_MAX_CALLBACKS]; int Count;
+};
+
 /* Registers a callback function for the given event. */
 /* NOTE: Trying to register a callback twice or over EVENT_MAX_CALLBACKS callbacks will terminate the game. */
 CC_API void Event_Register(struct Event_Void* handlers,   void* obj, Event_Void_Callback handler);
@@ -94,9 +101,20 @@ void Event_RaiseInput(struct Event_Input* handlers, int key, cc_bool repeating);
 void Event_RaiseString(struct Event_String* handlers, const cc_string* str);
 /* Calls all registered callbacks for an event which has raw pointer movement arguments. */
 void Event_RaiseRawMove(struct Event_RawMove* handlers, float xDelta, float yDelta);
+/* Calls all registered callbacks for an event which has a channel and a 64 byte data argument. */
+void Event_RaisePluginMessage(struct Event_PluginMessage* handlers, cc_uint8 channel, cc_uint8* data);
 
 void Event_UnregisterAll(void);
-/* NOTE: Event_UnregisterAll must be updated if events lists are changed */
+/* NOTE: Event_UnregisterAll MUST be updated when events lists are changed */
+
+/* Event API version supported by the client */
+/*  Version 1 - Added NetEvents.PluginMessageReceived */
+/*  Version 2 - Added WindowEvents.Redrawing */
+/*  Version 3 - Changed InputEvent.Press from code page 437 to unicode character */
+/* You MUST CHECK the event API version before attempting to use the events listed above, */
+/*  as otherwise if the player is using an older client that lacks some of the above events, */
+/*  you will be calling Event_Register on random data instead of the expected EventsList struct */
+CC_VAR extern int EventAPIVersion;
 
 CC_VAR extern struct _EntityEventsList {
 	struct Event_Int Added;    /* Entity is spawned in the current world */
@@ -150,16 +168,18 @@ CC_VAR extern struct _ChatEventsList {
 } ChatEvents;
 
 CC_VAR extern struct _WindowEventsList {
-	struct Event_Void Redraw;       /* Window contents invalidated, should be redrawn */
+	struct Event_Void RedrawNeeded; /* Window contents invalidated and will need to be redrawn */
 	struct Event_Void Resized;      /* Window is resized */
 	struct Event_Void Closing;      /* Window is about to close (should free resources/save state/etc here) */
 	struct Event_Void FocusChanged; /* Focus of the window changed */
-	struct Event_Void StateChanged; /* WindowState of the window changed */
+	struct Event_Void StateChanged; /* State of the window changed (e.g. minimised, fullscreen) */
 	struct Event_Void Created;      /* Window has been created, Window_Handle is valid now. */
+	struct Event_Void InactiveChanged; /* Inactive/background state of the window changed */
+	struct Event_Void Redrawing;    /* Window contents should be redrawn (as they are about to be displayed) */
 } WindowEvents;
 
 CC_VAR extern struct _InputEventsList {
-	struct Event_Int    Press; /* Key input character is typed. Arg is a character */
+	struct Event_Int    Press; /* Key input character is typed. Arg is a unicode character */
 	struct Event_Input  Down;  /* Key or button is pressed. Arg is a member of Key enumeration */
 	struct Event_Int    Up;    /* Key or button is released. Arg is a member of Key enumeration */
 	struct Event_Float  Wheel; /* Mouse wheel is moved/scrolled (Arg is wheel delta) */
@@ -174,7 +194,8 @@ CC_VAR extern struct _PointerEventsList {
 } PointerEvents;
 
 CC_VAR extern struct _NetEventsList {
-	struct Event_Void Connected;    /* Connection to a server was established. */
-	struct Event_Void Disconnected; /* Connection to the server was lost. */
+	struct Event_Void Connected;    /* Connection to a server was established */
+	struct Event_Void Disconnected; /* Connection to the server was lost */
+	struct Event_PluginMessage PluginMessageReceived; /* Received a PluginMessage packet from the server */
 } NetEvents;
 #endif

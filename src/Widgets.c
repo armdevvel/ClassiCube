@@ -76,13 +76,12 @@ void TextWidget_Init(struct TextWidget* w) {
 void TextWidget_Set(struct TextWidget* w, const cc_string* text, struct FontDesc* font) {
 	struct DrawTextArgs args;
 	Gfx_DeleteTexture(&w->tex.ID);
+	DrawTextArgs_Make(&args, text, font, true);
+	Drawer2D_MakeTextTexture(&w->tex, &args);
 
-	if (Drawer2D_IsEmptyText(text)) {
-		w->tex.Width  = 0; 
-		w->tex.Height = Drawer2D_FontHeight(font, true);
-	} else {	
-		DrawTextArgs_Make(&args, text, font, true);
-		Drawer2D_MakeTextTexture(&w->tex, &args);
+	/* Give text widget default height when text is empty */
+	if (!w->tex.Height) {
+		w->tex.Height = Font_CalcHeight(font, true);
 	}
 
 	w->width = w->tex.Width; w->height = w->tex.Height;
@@ -120,10 +119,10 @@ static void ButtonWidget_Reposition(void* widget) {
 }
 
 static void ButtonWidget_Render(void* widget, double delta) {
-	PackedCol normCol     = PackedCol_Make(224, 224, 224, 255);
-	PackedCol activeCol   = PackedCol_Make(255, 255, 160, 255);
-	PackedCol disabledCol = PackedCol_Make(160, 160, 160, 255);
-	PackedCol col;
+	PackedCol normColor     = PackedCol_Make(224, 224, 224, 255);
+	PackedCol activeColor   = PackedCol_Make(255, 255, 160, 255);
+	PackedCol disabledColor = PackedCol_Make(160, 160, 160, 255);
+	PackedCol color;
 
 	struct ButtonWidget* w = (struct ButtonWidget*)widget;
 	struct Texture back;	
@@ -142,7 +141,7 @@ static void ButtonWidget_Render(void* widget, double delta) {
 		Texture_Render(&back);
 	} else {
 		/* Split button down the middle */
-		scale = (w->width / 400.0f) * 0.5f;
+		scale = (w->width / 400.0f) / (2 * DisplayInfo.ScaleX);
 		Gfx_BindTexture(back.ID); /* avoid bind twice */
 
 		back.Width = (w->width / 2);
@@ -155,15 +154,15 @@ static void ButtonWidget_Render(void* widget, double delta) {
 	}
 
 	if (!w->tex.ID) return;
-	col = w->disabled ? disabledCol : (w->active ? activeCol : normCol);
-	Texture_RenderShaded(&w->tex, col);
+	color = w->disabled ? disabledColor : (w->active ? activeColor : normColor);
+	Texture_RenderShaded(&w->tex, color);
 }
 
 static void ButtonWidget_BuildMesh(void* widget, struct VertexTextured** vertices) {
-	PackedCol normCol     = PackedCol_Make(224, 224, 224, 255);
-	PackedCol activeCol   = PackedCol_Make(255, 255, 160, 255);
-	PackedCol disabledCol = PackedCol_Make(160, 160, 160, 255);
-	PackedCol col;
+	PackedCol normColor     = PackedCol_Make(224, 224, 224, 255);
+	PackedCol activeColor   = PackedCol_Make(255, 255, 160, 255);
+	PackedCol disabledColor = PackedCol_Make(160, 160, 160, 255);
+	PackedCol color;
 
 	struct ButtonWidget* w = (struct ButtonWidget*)widget;
 	struct Texture back;	
@@ -181,7 +180,7 @@ static void ButtonWidget_BuildMesh(void* widget, struct VertexTextured** vertice
 		*vertices += 4; /* always use up 8 vertices for body */
 	} else {
 		/* Split button down the middle */
-		scale = (w->width / 400.0f) * 0.5f;
+		scale = (w->width / 400.0f) / (2 * DisplayInfo.ScaleX);
 
 		back.Width = (w->width / 2);
 		back.uv.U1 = 0.0f; back.uv.U2 = BUTTON_uWIDTH * scale;
@@ -192,8 +191,8 @@ static void ButtonWidget_BuildMesh(void* widget, struct VertexTextured** vertice
 		Gfx_Make2DQuad(&back, w->col, vertices);
 	}
 
-	col = w->disabled ? disabledCol : (w->active ? activeCol : normCol);
-	Gfx_Make2DQuad(&w->tex, col, vertices);
+	color = w->disabled ? disabledColor : (w->active ? activeColor : normColor);
+	Gfx_Make2DQuad(&w->tex, color, vertices);
 }
 
 static int ButtonWidget_Render2(void* widget, int offset) {
@@ -233,13 +232,12 @@ void ButtonWidget_Init(struct ButtonWidget* w, int minWidth, Widget_LeftClick on
 void ButtonWidget_Set(struct ButtonWidget* w, const cc_string* text, struct FontDesc* font) {
 	struct DrawTextArgs args;
 	Gfx_DeleteTexture(&w->tex.ID);
+	DrawTextArgs_Make(&args, text, font, true);
+	Drawer2D_MakeTextTexture(&w->tex, &args);
 
-	if (Drawer2D_IsEmptyText(text)) {
-		w->tex.Width  = 0;
-		w->tex.Height = Drawer2D_FontHeight(font, true);
-	} else {
-		DrawTextArgs_Make(&args, text, font, true);
-		Drawer2D_MakeTextTexture(&w->tex, &args);
+	/* Give button default height when text is empty */
+	if (!w->tex.Height) {
+		w->tex.Height = Font_CalcHeight(font, true);
 	}
 	Widget_Layout(w);
 }
@@ -392,7 +390,6 @@ void ScrollbarWidget_Create(struct ScrollbarWidget* w) {
 #define HotbarWidget_TileX(w, idx) (int)(w->x + w->slotXOffset + w->slotWidth * (idx))
 
 static void HotbarWidget_RenderHotbarOutline(struct HotbarWidget* w) {
-	PackedCol white = PACKEDCOL_WHITE;
 	GfxResourceID tex;
 	int x;
 	
@@ -403,7 +400,7 @@ static void HotbarWidget_RenderHotbarOutline(struct HotbarWidget* w) {
 	x = HotbarWidget_TileX(w, Inventory.SelectedIndex);
 	w->selTex.ID = tex;
 	w->selTex.X  = (int)(x - w->selWidth / 2);
-	Gfx_Draw2DTexture(&w->selTex, white);
+	Gfx_Draw2DTexture(&w->selTex, PACKEDCOL_WHITE);
 }
 
 static void HotbarWidget_RenderHotbarBlocks(struct HotbarWidget* w) {
@@ -471,6 +468,17 @@ static void HotbarWidget_Render(void* widget, double delta) {
 	w->ellipsisTex.X = HotbarWidget_TileX(w, HOTBAR_MAX_INDEX) - w->ellipsisTex.Width / 2;
 	w->ellipsisTex.Y = w->y + (w->height / 2) - w->ellipsisTex.Height / 2;
 	Texture_Render(&w->ellipsisTex);
+	int i;
+	for (i = 0; i < HOTBAR_MAX_INDEX; i++) {
+		if(w->touchId[i] != -1) {
+			w->touchTime[i] += delta;
+			if(w->touchTime[i] > 1) {
+				w->touchId[i] = -1;
+				w->touchTime[i] = 0;
+				Inventory_Set(i, 0);
+			}
+		}
+	}
 #endif
 }
 
@@ -518,13 +526,50 @@ static int HotbarWidget_PointerDown(void* widget, int id, int x, int y) {
 		if (!Gui_Contains(cellX, cellY, width, height, x, y)) continue;
 
 #ifdef CC_BUILD_TOUCH
-		if (i == HOTBAR_MAX_INDEX && Input_TouchMode) {
-			InventoryScreen_Show(); return TOUCH_TYPE_GUI;
+		if(Input_TouchMode) {
+			if (i == HOTBAR_MAX_INDEX) {
+				InventoryScreen_Show(); return TOUCH_TYPE_GUI;
+			} else {
+				w->touchId[i] = id;
+				w->touchTime[i] = 0;
+			}
 		}
 #endif
 		Inventory_SetSelectedIndex(i);
 		return TOUCH_TYPE_GUI;
 	}
+	return false;
+}
+
+static void HotbarWidget_PointerUp(void* widget, int id, int x, int y) {
+#ifdef CC_BUILD_TOUCH
+	struct HotbarWidget* w = (struct HotbarWidget*)widget;
+	int i;
+
+	for (i = 0; i < HOTBAR_MAX_INDEX; i++) {
+		if (w->touchId[i] == id) {
+			w->touchId[i] = -1;
+			w->touchTime[i] = 0;
+		}
+	}
+#endif
+}
+
+static int HotbarWidget_PointerMove(void* widget, int id, int x, int y) {
+#ifdef CC_BUILD_TOUCH
+	struct HotbarWidget* w = (struct HotbarWidget*)widget;
+	int i;
+
+	for (i = 0; i < HOTBAR_MAX_INDEX; i++) {
+		if (w->touchId[i] == id) {
+			if (!Widget_Contains(w, x, y)) {
+				w->touchId[i] = -1;
+				w->touchTime[i] = 0;
+				return true;
+			}
+		}
+	}
+#endif
 	return false;
 }
 
@@ -554,9 +599,9 @@ static void HotbarWidget_Free(void* widget) {
 }
 
 static const struct WidgetVTABLE HotbarWidget_VTABLE = {
-	HotbarWidget_Render,      HotbarWidget_Free,    HotbarWidget_Reposition,
-	HotbarWidget_KeyDown,     HotbarWidget_InputUp, HotbarWidget_MouseScroll,
-	HotbarWidget_PointerDown, Widget_PointerUp,     Widget_PointerMove
+	HotbarWidget_Render,      HotbarWidget_Free,      HotbarWidget_Reposition,
+	HotbarWidget_KeyDown,     HotbarWidget_InputUp,   HotbarWidget_MouseScroll,
+	HotbarWidget_PointerDown, HotbarWidget_PointerUp, HotbarWidget_PointerMove
 };
 void HotbarWidget_Create(struct HotbarWidget* w) {
 	Widget_Reset(w);
@@ -564,6 +609,12 @@ void HotbarWidget_Create(struct HotbarWidget* w) {
 	w->horAnchor = ANCHOR_CENTRE;
 	w->verAnchor = ANCHOR_MAX;
 	w->scale     = 1;
+#ifdef CC_BUILD_TOUCH
+	int i;
+	for (i = 0; i < INVENTORY_BLOCKS_PER_HOTBAR - 1; i++) {
+		w->touchId[i] = -1;
+	}
+#endif
 }
 
 void HotbarWidget_SetFont(struct HotbarWidget* w, struct FontDesc* font) {
@@ -581,14 +632,10 @@ void HotbarWidget_SetFont(struct HotbarWidget* w, struct FontDesc* font) {
 /*########################################################################################################################*
 *-------------------------------------------------------TableWidget-------------------------------------------------------*
 *#########################################################################################################################*/
-static int Table_X(struct TableWidget* w) { return w->x - w->paddingX;    }
-static int Table_Y(struct TableWidget* w) { return w->y - w->paddingTopY; }
-static int Table_Width(struct TableWidget* w) {
-	return w->blocksPerRow * w->cellSizeX + w->paddingX * 2;
-}
-static int Table_Height(struct TableWidget* w) {
-	return w->rowsVisible  * w->cellSizeY + w->paddingTopY + w->paddingMaxY;
-}
+static int Table_X(struct TableWidget* w)      { return w->x - w->paddingL; }
+static int Table_Y(struct TableWidget* w)      { return w->y - w->paddingT; }
+static int Table_Width(struct TableWidget* w)  { return w->width + w->paddingL + w->paddingR; }
+static int Table_Height(struct TableWidget* w) { return w->height + w->paddingT + w->paddingB; }
 
 #define TABLE_MAX_VERTICES (8 * 10 * ISOMETRICDRAWER_MAXVERTICES)
 
@@ -613,73 +660,37 @@ static void TableWidget_MoveCursorToSelected(struct TableWidget* w) {
 	Cursor_SetPosition(x, y);
 }
 
-static void TableWidget_MakeBlockDesc(cc_string* desc, BlockID block) {
-	cc_string name;
-	int block_ = block;
-	if (Game_PureClassic) { String_AppendConst(desc, "Select block"); return; }
-	if (block == BLOCK_AIR) return;
-
-	name = Block_UNSAFE_GetName(block);
-	String_AppendString(desc, &name);
-	if (Game_ClassicMode) return;
-
-	String_Format1(desc, " (ID %i&f", &block_);
-	if (!Blocks.CanPlace[block])  { String_AppendConst(desc,  ", place &cNo&f"); }
-	if (!Blocks.CanDelete[block]) { String_AppendConst(desc, ", delete &cNo&f"); }
-	String_Append(desc, ')');
-}
-
-static void TableWidget_UpdateDescTexPos(struct TableWidget* w) {
-	w->descTex.X = w->x + w->width / 2 - w->descTex.Width / 2;
-	w->descTex.Y = w->y - w->descTex.Height - 5;
-}
-
-static void TableWidget_RecreateDescTex(struct TableWidget* w) {
+static void TableWidget_RecreateTitle(struct TableWidget* w) {
+	BlockID block;
 	if (w->selectedIndex == w->lastCreatedIndex) return;
 	if (w->blocksCount == 0) return;
 	w->lastCreatedIndex = w->selectedIndex;
 
-	Gfx_DeleteTexture(&w->descTex.ID);
-	if (w->selectedIndex == -1) return;
-	TableWidget_MakeDescTex(w, w->blocks[w->selectedIndex]);
-}
-
-void TableWidget_MakeDescTex(struct TableWidget* w, BlockID block) {
-	cc_string desc; char descBuffer[STRING_SIZE * 2];
-	struct DrawTextArgs args;
-
-	Gfx_DeleteTexture(&w->descTex.ID);
-	String_InitArray(desc, descBuffer);
-	TableWidget_MakeBlockDesc(&desc, block);
-	if (!desc.length) return;
-	
-	DrawTextArgs_Make(&args, &desc, w->font, true);
-	Drawer2D_MakeTextTexture(&w->descTex, &args);
-	TableWidget_UpdateDescTexPos(w);
-}
-
-static cc_bool TableWidget_RowEmpty(struct TableWidget* w, int start) {
-	int i, end = min(start + w->blocksPerRow, Array_Elems(Inventory.Map));
-
-	for (i = start; i < end; i++) {
-		if (Inventory.Map[i] != BLOCK_AIR) return false;
-	}
-	return true;
+	block = w->selectedIndex == -1 ? BLOCK_AIR : w->blocks[w->selectedIndex];
+	w->UpdateTitle(block);
 }
 
 void TableWidget_RecreateBlocks(struct TableWidget* w) {
-	int i, max = Game_UseCPEBlocks ? BLOCK_COUNT : BLOCK_ORIGINAL_COUNT;
+	int max = Game_UseCPEBlocks ? BLOCK_MAX_DEFINED : BLOCK_MAX_ORIGINAL;
+	int i, begCount, rowEnd;
+	cc_bool emptyRow;
 	BlockID block;
 	w->blocksCount = 0;
 
-	for (i = 0; i < Array_Elems(Inventory.Map); ) {
-		if ((i % w->blocksPerRow) == 0 && TableWidget_RowEmpty(w, i)) {
-			i += w->blocksPerRow; continue;
+	for (i = 0; i < Array_Elems(Inventory.Map);) {
+		emptyRow = true;
+		begCount = w->blocksCount;
+		rowEnd   = min(i + w->blocksPerRow, Array_Elems(Inventory.Map));
+
+		for (; i < rowEnd; i++) {
+			block = Inventory.Map[i];
+			if (block > max) continue;
+			
+			w->blocks[w->blocksCount++] = block;
+			if (block != BLOCK_AIR) emptyRow = false;
 		}
 
-		block = Inventory.Map[i];
-		if (block < max) { w->blocks[w->blocksCount++] = block; }
-		i++;
+		if (emptyRow) w->blocksCount = begCount;
 	}
 
 	w->rowsTotal = Math_CeilDiv(w->blocksCount, w->blocksPerRow);
@@ -694,15 +705,15 @@ static void TableWidget_Render(void* widget, double delta) {
 	int i, x, y;
 
 	/* These were sourced by taking a screenshot of vanilla */
-	/* Then using paint to extract the colour components */
+	/* Then using paint to extract the color components */
 	/* Then using wolfram alpha to solve the glblendfunc equation */
-	PackedCol topBackCol    = PackedCol_Make( 34,  34,  34, 168);
-	PackedCol bottomBackCol = PackedCol_Make( 57,  57, 104, 202);
-	PackedCol topSelCol     = PackedCol_Make(255, 255, 255, 142);
-	PackedCol bottomSelCol  = PackedCol_Make(255, 255, 255, 192);
+	PackedCol topBackColor    = PackedCol_Make( 34,  34,  34, 168);
+	PackedCol bottomBackColor = PackedCol_Make( 57,  57, 104, 202);
+	PackedCol topSelColor     = PackedCol_Make(255, 255, 255, 142);
+	PackedCol bottomSelColor  = PackedCol_Make(255, 255, 255, 192);
 
 	Gfx_Draw2DGradient(Table_X(w), Table_Y(w),
-		Table_Width(w), Table_Height(w), topBackCol, bottomBackCol);
+		Table_Width(w), Table_Height(w), topBackColor, bottomBackColor);
 
 	if (w->rowsVisible < w->rowsTotal) {
 		Elem_Render(&w->scroll, delta);
@@ -710,16 +721,15 @@ static void TableWidget_Render(void* widget, double delta) {
 
 	cellSizeX = w->cellSizeX;
 	cellSizeY = w->cellSizeY;
-	if (w->selectedIndex != -1 && Game_ClassicMode && w->blocks[w->selectedIndex] != BLOCK_AIR) {
+	if (w->selectedIndex != -1 && Gui.ClassicInventory && w->blocks[w->selectedIndex] != BLOCK_AIR) {
 		TableWidget_GetCoords(w, w->selectedIndex, &x, &y);
 
 		/* TODO: Need two size arguments, in case X/Y dpi differs */
 		off  = cellSizeX * 0.1f;
 		size = (int)(cellSizeX + off * 2);
 		Gfx_Draw2DGradient((int)(x - off), (int)(y - off),
-			size, size, topSelCol, bottomSelCol);
+			size, size, topSelColor, bottomSelColor);
 	}
-	Gfx_SetTexturing(true);
 	Gfx_SetVertexFormat(VERTEX_FORMAT_TEXTURED);
 
 	IsometricDrawer_BeginBatch(vertices, w->vb);
@@ -729,8 +739,8 @@ static void TableWidget_Render(void* widget, double delta) {
 		/* We want to always draw the selected block on top of others */
 		/* TODO: Need two size arguments, in case X/Y dpi differs */
 		if (i == w->selectedIndex) continue;
-		IsometricDrawer_DrawBatch(w->blocks[i], cellSizeX * 0.7f / 2.0f,
-			x + cellSizeX / 2, y + cellSizeY / 2);
+		IsometricDrawer_DrawBatch(w->blocks[i],
+			w->normBlockSize, x + cellSizeX / 2, y + cellSizeY / 2);
 	}
 
 	i = w->selectedIndex;
@@ -738,48 +748,46 @@ static void TableWidget_Render(void* widget, double delta) {
 		TableWidget_GetCoords(w, i, &x, &y);
 
 		IsometricDrawer_DrawBatch(w->blocks[i],
-			(cellSizeX + w->selBlockExpand) * 0.7f / 2.0f,
-			x + cellSizeX / 2, y + cellSizeY / 2);
+			w->selBlockSize, x + cellSizeX / 2, y + cellSizeY / 2);
 	}
 	IsometricDrawer_EndBatch();
-
-	if (w->descTex.ID) { Texture_Render(&w->descTex); }
-	Gfx_SetTexturing(false);
 }
 
 static void TableWidget_Free(void* widget) {
 	struct TableWidget* w = (struct TableWidget*)widget;
 	Gfx_DeleteDynamicVb(&w->vb);
-	Gfx_DeleteTexture(&w->descTex.ID);
 	w->lastCreatedIndex = -1000;
 }
 
 void TableWidget_Recreate(struct TableWidget* w) {
 	Elem_Free(w);
 	Gfx_RecreateDynamicVb(&w->vb, VERTEX_FORMAT_TEXTURED, TABLE_MAX_VERTICES);
-	TableWidget_RecreateDescTex(w);
+	TableWidget_RecreateTitle(w);
 }
 
 static void TableWidget_Reposition(void* widget) {
 	struct TableWidget* w = (struct TableWidget*)widget;
-	float scale = w->scale;
-	int cellSize;
+	cc_bool classic = Gui.ClassicInventory;
+	float scale = Math_SqrtF(w->scale);
+	int cellSize, blockSize;
 
-	cellSize     = (int)(50 * Math_SqrtF(scale));
-	w->cellSizeX = Display_ScaleX(cellSize);
-	w->cellSizeY = Display_ScaleY(cellSize);
+	cellSize     = classic ? 48 : 50;
+	w->cellSizeX = Display_ScaleX(cellSize * scale);
+	w->cellSizeY = Display_ScaleY(cellSize * scale);
 
-	w->selBlockExpand = 25.0f * Math_SqrtF(scale);
-	w->rowsVisible    = min(8, w->rowsTotal); /* 8 rows max */
+	blockSize    = classic ? 40 : 50;
+	blockSize    = Display_ScaleX(blockSize * scale);
+	w->normBlockSize = (blockSize             ) * 0.7f / 2.0f;
+	w->selBlockSize  = (blockSize + 25 * scale) * 0.7f / 2.0f;
+	w->rowsVisible   = min(8, w->rowsTotal); /* 8 rows max */
 
 	do {
 		w->width  = w->cellSizeX * w->blocksPerRow;
 		w->height = w->cellSizeY * w->rowsVisible;
 		Widget_CalcPosition(w);
-		TableWidget_UpdateDescTexPos(w);
 
 		/* Does the table fit on screen? */
-		if (Game_ClassicMode || Table_Y(w) >= 0) break;
+		if (classic || Table_Y(w) >= 0) break;
 		w->rowsVisible--;
 	} while (w->rowsVisible > 1);
 
@@ -801,7 +809,7 @@ static void TableWidget_ScrollRelative(struct TableWidget* w, int delta) {
 	w->scroll.topRow += (index / w->blocksPerRow) - (start / w->blocksPerRow);
 	ScrollbarWidget_ClampTopRow(&w->scroll);
 
-	TableWidget_RecreateDescTex(w);
+	TableWidget_RecreateTitle(w);
 	TableWidget_MoveCursorToSelected(w);
 }
 
@@ -843,7 +851,7 @@ static int TableWidget_MouseScroll(void* widget, float delta) {
 	if (index >= w->blocksCount) index = -1;
 
 	w->selectedIndex = index;
-	TableWidget_RecreateDescTex(w);
+	TableWidget_RecreateTitle(w);
 	return true;
 }
 
@@ -871,7 +879,7 @@ static int TableWidget_PointerMove(void* widget, int id, int x, int y) {
 			}
 		}
 	}
-	TableWidget_RecreateDescTex(w);
+	TableWidget_RecreateTitle(w);
 	return true;
 }
 
@@ -898,7 +906,8 @@ static const struct WidgetVTABLE TableWidget_VTABLE = {
 	TableWidget_KeyDown,     Widget_InputUp,        TableWidget_MouseScroll,
 	TableWidget_PointerDown, TableWidget_PointerUp, TableWidget_PointerMove
 };
-void TableWidget_Create(struct TableWidget* w) {	
+void TableWidget_Create(struct TableWidget* w) {
+	cc_bool classic;
 	Widget_Reset(w);
 	w->VTABLE = &TableWidget_VTABLE;
 	w->lastCreatedIndex = -1000;
@@ -909,9 +918,11 @@ void TableWidget_Create(struct TableWidget* w) {
 	w->lastX = -20; w->lastY = -20;
 	w->scale = 1;
 
-	w->paddingX    = Display_ScaleX(15);
-	w->paddingTopY = Display_ScaleY(15 + 20);
-	w->paddingMaxY = Display_ScaleX(15);
+	classic     = Gui.ClassicInventory;
+	w->paddingL = Display_ScaleX(classic ? 20 : 15);
+	w->paddingR = Display_ScaleX(classic ? 28 : 15);
+	w->paddingT = Display_ScaleY(classic ? 46 : 35);
+	w->paddingB = Display_ScaleY(classic ? 14 : 15);
 }
 
 void TableWidget_SetBlockTo(struct TableWidget* w, BlockID block) {
@@ -928,7 +939,7 @@ void TableWidget_SetBlockTo(struct TableWidget* w, BlockID block) {
 	w->scroll.topRow -= (w->rowsVisible - 1);
 	ScrollbarWidget_ClampTopRow(&w->scroll);
 	TableWidget_MoveCursorToSelected(w);
-	TableWidget_RecreateDescTex(w);
+	TableWidget_RecreateTitle(w);
 }
 
 void TableWidget_OnInventoryChanged(struct TableWidget* w) {
@@ -940,7 +951,7 @@ void TableWidget_OnInventoryChanged(struct TableWidget* w) {
 
 	w->scroll.topRow = w->selectedIndex / w->blocksPerRow;
 	ScrollbarWidget_ClampTopRow(&w->scroll);
-	TableWidget_RecreateDescTex(w);
+	TableWidget_RecreateTitle(w);
 }
 
 
@@ -960,7 +971,7 @@ static void InputWidget_FormatLine(struct InputWidget* w, int i, cc_string* line
 
 	for (i = 0; i < src.length; i++) {
 		char c = src.buffer[i];
-		if (c == '%' && Drawer2D_ValidColCodeAt(&src, i + 1)) { c = '&'; }
+		if (c == '%' && Drawer2D_ValidColorCodeAt(&src, i + 1)) { c = '&'; }
 		String_Append(line, c);
 	}
 }
@@ -995,7 +1006,7 @@ static char InputWidget_GetLastCol(struct InputWidget* w, int x, int y) {
 		line.length = 0;
 		InputWidget_FormatLine(w, y, &line);
 
-		col = Drawer2D_LastCol(&line, x);
+		col = Drawer2D_LastColor(&line, x);
 		if (col) return col;
 		if (y > 0) { x = w->lines[y - 1].length; }
 	}
@@ -1047,7 +1058,7 @@ static void InputWidget_UpdateCaret(struct InputWidget* w) {
 	colCode = InputWidget_GetLastCol(w, w->caretX, w->caretY);
 
 	if (colCode) {
-		col = Drawer2D_GetCol(colCode);
+		col = Drawer2D_GetColor(colCode);
 		/* Component order might be different to BitmapCol */
 		w->caretCol = PackedCol_Make(BitmapCol_R(col), BitmapCol_G(col), 
 									 BitmapCol_B(col), BitmapCol_A(col));
@@ -1487,13 +1498,13 @@ static int TextInputWidget_Render2(void* widget, int offset) {
 static void TextInputWidget_RemakeTexture(void* widget) {
 	cc_string range; char rangeBuffer[STRING_SIZE];
 	struct TextInputWidget* w = (struct TextInputWidget*)widget;
-	PackedCol backCol = PackedCol_Make(30, 30, 30, 200);
+	PackedCol backColor = PackedCol_Make(30, 30, 30, 200);
 	struct MenuInputDesc* desc;
 	struct DrawTextArgs args;
 	struct Texture* tex;
 	int textWidth, lineHeight;
 	int width, height, hintX, y;
-	struct Bitmap bmp;
+	struct Context2D ctx;
 
 	DrawTextArgs_Make(&args, &w->base.text, w->base.font, false);
 	textWidth   = Drawer2D_TextWidth(&args);
@@ -1507,27 +1518,27 @@ static void TextInputWidget_RemakeTexture(void* widget) {
 	width  = max(textWidth,  w->minWidth);  w->base.width  = width;
 	height = max(lineHeight, w->minHeight); w->base.height = height;
 
-	Bitmap_AllocateClearedPow2(&bmp, width, height);
+	Context2D_Alloc(&ctx, width, height);
 	{
 		/* Centre text vertically */
 		y = 0;
 		if (lineHeight < height) { y = height / 2 - lineHeight / 2; }
 		w->base.caretOffset = 2 + y;
 
-		Drawer2D_Clear(&bmp, backCol, 0, 0, width, height);
-		Drawer2D_DrawText(&bmp, &args, w->base.padding, y);
+		Context2D_Clear(&ctx, backColor, 0, 0, width, height);
+		Context2D_DrawText(&ctx, &args, w->base.padding, y);
 
 		args.text = range;
 		hintX     = width - Drawer2D_TextWidth(&args);
 		/* Draw hint text right-aligned if it won't overlap input text */
 		if (textWidth + 3 < hintX) {
-			Drawer2D_DrawText(&bmp, &args, hintX, y);
+			Context2D_DrawText(&ctx, &args, hintX, y);
 		}
 	}
 
 	tex = &w->base.inputTex;
-	Drawer2D_MakeTexture(tex, &bmp, width, height);
-	Mem_Free(bmp.scan0);
+	Context2D_MakeTexture(tex, &ctx);
+	Context2D_Free(&ctx);
 
 	Widget_Layout(&w->base);
 	tex->X = w->base.x; tex->Y = w->base.y;
@@ -1553,12 +1564,25 @@ static cc_bool TextInputWidget_AllowedChar(void* widget, char c) {
 	return valid;
 }
 
+static int TextInputWidget_PointerDown(void* widget, int id, int x, int y) {
+	struct TextInputWidget* w = (struct TextInputWidget*)widget;
+#ifdef CC_BUILD_TOUCH
+	struct OpenKeyboardArgs args;
+
+	OpenKeyboardArgs_Init(&args, &w->base.text, w->onscreenType);
+	args.placeholder = w->onscreenPlaceholder;
+	Window_OpenKeyboard(&args);
+#endif
+	w->base.showCaret = true;
+	return InputWidget_PointerDown(widget, id, x, y);
+}
+
 static int TextInputWidget_GetMaxLines(void) { return 1; }
 static const struct WidgetVTABLE TextInputWidget_VTABLE = {
-	TextInputWidget_Render,  InputWidget_Free, InputWidget_Reposition,
-	InputWidget_KeyDown,     Widget_InputUp,   Widget_MouseScroll,
-	InputWidget_PointerDown, Widget_PointerUp, Widget_PointerMove,
-	TextInputWidget_BuildMesh, TextInputWidget_Render2
+	TextInputWidget_Render,      InputWidget_Free, InputWidget_Reposition,
+	InputWidget_KeyDown,         Widget_InputUp,   Widget_MouseScroll,
+	TextInputWidget_PointerDown, Widget_PointerUp, Widget_PointerMove,
+	TextInputWidget_BuildMesh,   TextInputWidget_Render2
 };
 void TextInputWidget_Create(struct TextInputWidget* w, int width, const cc_string* text, struct MenuInputDesc* desc) {
 	InputWidget_Reset(&w->base);
@@ -1570,7 +1594,7 @@ void TextInputWidget_Create(struct TextInputWidget* w, int width, const cc_strin
 
 	w->base.convertPercents = false;
 	w->base.padding         = 3;
-	w->base.showCaret       = true;
+	w->base.showCaret       = !Input_TouchMode;
 
 	w->base.GetMaxLines    = TextInputWidget_GetMaxLines;
 	w->base.RemakeTexture  = TextInputWidget_RemakeTexture;
@@ -1579,11 +1603,13 @@ void TextInputWidget_Create(struct TextInputWidget* w, int width, const cc_strin
 
 	String_InitArray(w->base.text, w->_textBuffer);
 	String_Copy(&w->base.text, text);
+	w->onscreenPlaceholder = "";
+	w->onscreenType        = KEYBOARD_TYPE_TEXT;
 }
 
 void TextInputWidget_SetFont(struct TextInputWidget* w, struct FontDesc* font) {
 	w->base.font       = font;
-	w->base.lineHeight = Drawer2D_FontHeight(font, false);
+	w->base.lineHeight = Font_CalcHeight(font, false);
 	InputWidget_UpdateText(&w->base);
 }
 
@@ -1593,14 +1619,45 @@ void TextInputWidget_SetFont(struct TextInputWidget* w, struct FontDesc* font) {
 *#########################################################################################################################*/
 static const cc_string chatInputPrefix = String_FromConst("> ");
 
-static void ChatInputWidget_RemakeTexture(void* widget) {
+static void ChatInputWidget_MakeTexture(struct InputWidget* w, int width, int height) {
 	cc_string line; char lineBuffer[STRING_SIZE + 2];
-	struct InputWidget* w = (struct InputWidget*)widget;
 	struct DrawTextArgs args;
-	int width = 0, height = 0;
-	struct Bitmap bmp;
+	struct Context2D ctx;
 	char lastCol;
 	int i, x, y;
+
+	Context2D_Alloc(&ctx, width, height);
+
+	DrawTextArgs_Make(&args, &chatInputPrefix, w->font, true);
+	Context2D_DrawText(&ctx, &args, 0, 0);
+
+	String_InitArray(line, lineBuffer);
+	for (i = 0, y = 0; i < Array_Elems(w->lines); i++) {
+		if (!w->lines[i].length) break;
+		line.length = 0;
+
+		/* Color code continues in next line */
+		lastCol = InputWidget_GetLastCol(w, 0, i);
+		if (!Drawer2D_IsWhiteColor(lastCol)) {
+			String_Append(&line, '&'); String_Append(&line, lastCol);
+		}
+		/* Convert % to & for color codes */
+		InputWidget_FormatLine(w, i, &line);
+		args.text = line;
+
+		x = i == 0 ? w->prefixWidth : 0;
+		Context2D_DrawText(&ctx, &args, x, y);
+		y += w->lineHeight;
+	}
+
+	Context2D_MakeTexture(&w->inputTex, &ctx);
+	Context2D_Free(&ctx);
+}
+
+static void ChatInputWidget_RemakeTexture(void* widget) {
+	struct InputWidget* w = (struct InputWidget*)widget;
+	int width = 0, height = 0;
+	int i;
 
 	for (i = 0; i < w->GetMaxLines(); i++) {
 		if (!w->lines[i].length) break;
@@ -1610,32 +1667,12 @@ static void ChatInputWidget_RemakeTexture(void* widget) {
 
 	if (!width)  width  = w->prefixWidth;
 	if (!height) height = w->lineHeight;
-	Bitmap_AllocateClearedPow2(&bmp, width, height);
-
-	DrawTextArgs_Make(&args, &chatInputPrefix, w->font, true);
-	Drawer2D_DrawText(&bmp, &args, 0, 0);
-
-	String_InitArray(line, lineBuffer);
-	for (i = 0, y = 0; i < Array_Elems(w->lines); i++) {
-		if (!w->lines[i].length) break;
-		line.length = 0;
-
-		/* Colour code continues in next line */
-		lastCol = InputWidget_GetLastCol(w, 0, i);
-		if (!Drawer2D_IsWhiteCol(lastCol)) {
-			String_Append(&line, '&'); String_Append(&line, lastCol);
-		}
-		/* Convert % to & for colour codes */
-		InputWidget_FormatLine(w, i, &line);
-		args.text = line;
-
-		x = i == 0 ? w->prefixWidth : 0;
-		Drawer2D_DrawText(&bmp, &args, x, y);
-		y += w->lineHeight;
+	
+	if (w->disabled) {
+		Gfx_DeleteTexture(&w->inputTex.ID);
+	} else {
+		ChatInputWidget_MakeTexture(w, width, height);
 	}
-
-	Drawer2D_MakeTexture(&w->inputTex, &bmp, width, height);
-	Mem_Free(bmp.scan0);
 	w->caretAccumulator = 0;
 
 	w->width  = width;
@@ -1647,25 +1684,24 @@ static void ChatInputWidget_RemakeTexture(void* widget) {
 
 static void ChatInputWidget_Render(void* widget, double delta) {
 	struct InputWidget* w = (struct InputWidget*)widget;
-	PackedCol backCol     = PackedCol_Make(0, 0, 0, 127);
+	PackedCol backColor   = PackedCol_Make(0, 0, 0, 127);
 	int x = w->x, y = w->y;
 	cc_bool caretAtEnd;
 	int i, width;
+	if (w->disabled) return;
 
-	Gfx_SetTexturing(false);
 	for (i = 0; i < INPUTWIDGET_MAX_LINES; i++) {
 		if (i > 0 && !w->lines[i].length) break;
 
 		caretAtEnd = (w->caretY == i) && (w->caretX == INPUTWIDGET_LEN || w->caretPos == -1);
 		width      = w->lineWidths[i] + (caretAtEnd ? w->caretTex.Width : 0);
-		/* Cover whole window width to match original classic behaviour */
-		if (Gui.ClassicChat) { width = max(width, WindowInfo.Width - x * 4); }
+		/* Cover whole window width to match Minecraft behaviour */
+		width      = max(width, WindowInfo.Width - x * 4);
 	
-		Gfx_Draw2DFlat(x, y, width + w->padding * 2, w->lineHeight, backCol);
+		Gfx_Draw2DFlat(x, y, width + w->padding * 2, w->lineHeight, backColor);
 		y += w->lineHeight;
 	}
 
-	Gfx_SetTexturing(true);
 	Texture_Render(&w->inputTex);
 	InputWidget_RenderCaret(w, delta);
 }
@@ -1924,7 +1960,7 @@ static int TextGroupWidget_NextUrl(char* chars, int charsLen, int i) {
 		left = charsLen - i;
 		if (left < TEXTGROUPWIDGET_HTTP_LEN) return charsLen;
 
-		/* colour codes at start of URL */
+		/* color codes at start of URL */
 		start = i;
 		while (left >= 2 && chars[i] == '&') { left -= 2; i += 2; }
 		if (left < TEXTGROUPWIDGET_HTTP_LEN) continue;
@@ -1994,8 +2030,8 @@ static void TextGroupWidget_Output(struct Portion bit, int lineBeg, int lineEnd,
 
 static int TextGroupWidget_Reduce(struct TextGroupWidget* w, char* chars, int target, struct Portion* portions) {
 	struct Portion* start = portions;	
-	int begs[TEXTGROUPWIDGET_MAX_LINES];
-	int ends[TEXTGROUPWIDGET_MAX_LINES];
+	int begs[GUI_MAX_CHATLINES];
+	int ends[GUI_MAX_CHATLINES];
 	struct Portion bit;
 	cc_string line;
 	int nextStart, i, total = 0, end;
@@ -2046,7 +2082,7 @@ static void TextGroupWidget_FormatUrl(cc_string* text, const cc_string* url) {
 }
 
 static cc_bool TextGroupWidget_GetUrl(struct TextGroupWidget* w, cc_string* text, int index, int mouseX) {
-	char chars[TEXTGROUPWIDGET_MAX_LINES * TEXTGROUPWIDGET_LEN];
+	char chars[GUI_MAX_CHATLINES * TEXTGROUPWIDGET_LEN];
 	struct Portion portions[2 * (TEXTGROUPWIDGET_LEN / TEXTGROUPWIDGET_HTTP_LEN)];
 	struct Portion bit;
 	struct DrawTextArgs args = { 0 };
@@ -2110,12 +2146,12 @@ static cc_bool TextGroupWidget_MightHaveUrls(struct TextGroupWidget* w) {
 }
 
 static void TextGroupWidget_DrawAdvanced(struct TextGroupWidget* w, struct Texture* tex, struct DrawTextArgs* args, int index, const cc_string* text) {
-	char chars[TEXTGROUPWIDGET_MAX_LINES * TEXTGROUPWIDGET_LEN];
+	char chars[GUI_MAX_CHATLINES * TEXTGROUPWIDGET_LEN];
 	struct Portion portions[2 * (TEXTGROUPWIDGET_LEN / TEXTGROUPWIDGET_HTTP_LEN)];
 	struct Portion bit;
 	int width, height;
 	int partWidths[Array_Elems(portions)];
-	struct Bitmap bmp;
+	struct Context2D ctx;
 	int portionsCount;
 	int i, x, ul;
 
@@ -2131,7 +2167,7 @@ static void TextGroupWidget_DrawAdvanced(struct TextGroupWidget* w, struct Textu
 		width += partWidths[i];
 	}
 	
-	Bitmap_AllocateClearedPow2(&bmp, width, height);
+	Context2D_Alloc(&ctx, width, height);
 	{
 		x = 0;
 		for (i = 0; i < portionsCount; i++) {
@@ -2140,14 +2176,14 @@ static void TextGroupWidget_DrawAdvanced(struct TextGroupWidget* w, struct Textu
 			args->text = String_UNSAFE_Substring(text, bit.LineBeg, bit.LineLen);
 
 			if (ul) args->font->flags |= FONT_FLAGS_UNDERLINE;
-			Drawer2D_DrawText(&bmp, args, x, 0);
+			Context2D_DrawText(&ctx, args, x, 0);
 			if (ul) args->font->flags &= ~FONT_FLAGS_UNDERLINE;
 
 			x += partWidths[i];
 		}
-		Drawer2D_MakeTexture(tex, &bmp, width, height);
+		Context2D_MakeTexture(tex, &ctx);
 	}
-	Mem_Free(bmp.scan0);
+	Context2D_Free(&ctx);
 }
 
 void TextGroupWidget_RedrawAll(struct TextGroupWidget* w) {
@@ -2201,7 +2237,7 @@ void TextGroupWidget_RedrawAllWithCol(struct TextGroupWidget* group, char col) {
 void TextGroupWidget_SetFont(struct TextGroupWidget* w, struct FontDesc* font) {
 	int i, height;
 	
-	height = Drawer2D_FontHeight(font, true);
+	height = Font_CalcHeight(font, true);
 	Drawer2D_ReducePadding_Height(&height, font->size, 3);
 	w->defaultHeight = height;
 
@@ -2253,7 +2289,7 @@ static void SpecialInputWidget_UpdateColString(struct SpecialInputWidget* w) {
 	int i;
 	String_InitArray(w->colString, w->_colBuffer);
 
-	for (i = 0; i < DRAWER2D_MAX_COLS; i++) {
+	for (i = 0; i < DRAWER2D_MAX_COLORS; i++) {
 		if (i >= 'A' && i <= 'F')           continue;
 		if (!BitmapCol_A(Drawer2D.Colors[i])) continue;
 
@@ -2287,7 +2323,7 @@ static void SpecialInputWidget_IntersectsBody(struct SpecialInputWidget* w, int 
 	i = (x + y * e.itemsPerRow) * e.charsPerItem;
 	if (i >= e.contents.length) return;
 
-	/* TODO: need to insert characters that don't affect w->caretPos index, adjust w->caretPos colour */
+	/* TODO: need to insert characters that don't affect w->caretPos index, adjust w->caretPos color */
 	str = String_Init(&e.contents.buffer[i], e.charsPerItem, 0);
 
 	/* TODO: Not be so hacky */
@@ -2340,21 +2376,21 @@ static int SpecialInputWidget_MeasureTitles(struct SpecialInputWidget* w) {
 	return width;
 }
 
-static void SpecialInputWidget_DrawTitles(struct SpecialInputWidget* w, struct Bitmap* bmp) {
-	BitmapCol col_selected = BitmapCol_Make(30, 30, 30, 200);
-	BitmapCol col_inactive = BitmapCol_Make( 0,  0,  0, 127);
-	BitmapCol col;
+static void SpecialInputWidget_DrawTitles(struct SpecialInputWidget* w, struct Context2D* ctx) {
+	BitmapCol color_selected = BitmapCol_Make(30, 30, 30, 200);
+	BitmapCol color_inactive = BitmapCol_Make( 0,  0,  0, 127);
+	BitmapCol color;
 	struct DrawTextArgs args;
 	int i, width, x = 0;
 
 	DrawTextArgs_MakeEmpty(&args, w->font, false);
 	for (i = 0; i < Array_Elems(w->tabs); i++) {
 		args.text = w->tabs[i].title;
-		col   = i == w->selectedIndex ? col_selected : col_inactive;
+		color = i == w->selectedIndex ? color_selected : color_inactive;
 		width = w->tabs[i].titleWidth;
 
-		Drawer2D_Clear(bmp, col, x, 0, width, w->titleHeight);
-		Drawer2D_DrawText(bmp, &args, x + SPECIAL_TITLE_SPACING / 2, 0);
+		Context2D_Clear(ctx, color, x, 0, width, w->titleHeight);
+		Context2D_DrawText(ctx, &args, x + SPECIAL_TITLE_SPACING / 2, 0);
 		x += width;
 	}
 }
@@ -2384,7 +2420,7 @@ static int SpecialInputWidget_ContentHeight(struct SpecialInputWidget* w, struct
 	return w->elementHeight * rows;
 }
 
-static void SpecialInputWidget_DrawContent(struct SpecialInputWidget* w, struct SpecialInputTab* tab, struct Bitmap* bmp, int yOffset) {
+static void SpecialInputWidget_DrawContent(struct SpecialInputWidget* w, struct SpecialInputTab* tab, struct Context2D* ctx, int yOffset) {
 	struct DrawTextArgs args;
 	int i, x, y, item;	
 
@@ -2398,16 +2434,16 @@ static void SpecialInputWidget_DrawContent(struct SpecialInputWidget* w, struct 
 
 		x = (item % wrap) * w->elementWidth;
 		y = (item / wrap) * w->elementHeight + yOffset;
-		Drawer2D_DrawText(bmp, &args, x, y);
+		Context2D_DrawText(ctx, &args, x, y);
 	}
 }
 
 static void SpecialInputWidget_Make(struct SpecialInputWidget* w, struct SpecialInputTab* tab) {
-	BitmapCol col = BitmapCol_Make(30, 30, 30, 200);
+	BitmapCol color = BitmapCol_Make(30, 30, 30, 200);
 	int titlesWidth, titlesHeight;
 	int contentWidth, contentHeight;
+	struct Context2D ctx;
 	int width, height;
-	struct Bitmap bmp;
 
 	titlesWidth   = SpecialInputWidget_MeasureTitles(w);
 	titlesHeight  = w->titleHeight;
@@ -2418,14 +2454,14 @@ static void SpecialInputWidget_Make(struct SpecialInputWidget* w, struct Special
 	height = titlesHeight + contentHeight;
 	Gfx_DeleteTexture(&w->tex.ID);
 
-	Bitmap_AllocateClearedPow2(&bmp, width, height);
+	Context2D_Alloc(&ctx, width, height);
 	{
-		SpecialInputWidget_DrawTitles(w, &bmp);
-		Drawer2D_Clear(&bmp, col, 0, titlesHeight, width, contentHeight);
-		SpecialInputWidget_DrawContent(w, tab, &bmp, titlesHeight);
+		SpecialInputWidget_DrawTitles(w, &ctx);
+		Context2D_Clear(&ctx, color, 0, titlesHeight, width, contentHeight);
+		SpecialInputWidget_DrawContent(w, tab, &ctx, titlesHeight);
 	}
-	Drawer2D_MakeTexture(&w->tex, &bmp, width, height);
-	Mem_Free(bmp.scan0);
+	Context2D_MakeTexture(&w->tex, &ctx);
+	Context2D_Free(&ctx);
 }
 
 void SpecialInputWidget_Redraw(struct SpecialInputWidget* w) {
@@ -2507,7 +2543,7 @@ void SpecialInputWidget_Create(struct SpecialInputWidget* w, struct FontDesc* fo
 static void ThumbstickWidget_Rotate(void* widget, struct VertexTextured** vertices, int offset) {
 	struct ThumbstickWidget* w = (struct ThumbstickWidget*)widget;
 	struct VertexTextured* ptr;
-	int i, x, y;
+	int i;
 
 	ptr = *vertices - 4;
 	for (i = 0; i < 4; i++) {

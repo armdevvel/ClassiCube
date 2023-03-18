@@ -10,38 +10,6 @@
 #include "Server.h"
 #include "Options.h"
 
-/*#define CC_TEST_VORBIS*/
-#ifdef CC_TEST_VORBIS
-#include "ExtMath.h"
-#include "Vorbis.h"
-
-#define VORBIS_N 1024
-#define VORBIS_N2 (VORBIS_N / 2)
-int main_imdct() {
-	float in[VORBIS_N2], out[VORBIS_N], out2[VORBIS_N];
-	double delta[VORBIS_N];
-
-	RngState rng;
-	Random_Seed(&rng, 2342334);
-	struct imdct_state imdct;
-	imdct_init(&imdct, VORBIS_N);
-
-	for (int ii = 0; ii < VORBIS_N2; ii++) {
-		in[ii] = Random_Float(&rng);
-	}
-
-	imdct_slow(in, out, VORBIS_N2);
-	imdct_calc(in, out2, &imdct);
-
-	double sum = 0;
-	for (int ii = 0; ii < VORBIS_N; ii++) {
-		delta[ii] = out2[ii] - out[ii];
-		sum += delta[ii];
-	}
-	int fff = 0;
-}
-#endif
-
 static void RunGame(void) {
 	cc_string title; char titleBuffer[STRING_SIZE];
 	int width  = Options_GetInt(OPT_WINDOW_WIDTH,  0, DisplayInfo.Width,  0);
@@ -84,11 +52,24 @@ CC_NOINLINE static void WarnMissingArgs(int argsCount, const cc_string* args) {
 	Logger_DialogWarn(&tmp);
 }
 
-#ifdef CC_BUILD_ANDROID
-int Program_Run(int argc, char** argv) {
-#else
-static int Program_Run(int argc, char** argv) {
-#endif
+static void SetupProgram(int argc, char** argv) {
+	static char ipBuffer[STRING_SIZE];
+	cc_result res;
+	Logger_Hook();
+	Platform_Init();
+	res = Platform_SetDefaultCurrentDirectory(argc, argv);
+
+	Options_Load();
+	Window_Init();
+	
+	if (res) Logger_SysWarn(res, "setting current directory");
+	Platform_LogConst("Starting " GAME_APP_NAME " ..");
+	String_InitArray(Server.Address, ipBuffer);
+}
+
+#define SP_HasDir(path) (String_IndexOf(&path, '/') >= 0 || String_IndexOf(&path, '\\') >= 0)
+
+static int RunProgram(int argc, char** argv) {
 	cc_string args[GAME_MAX_CMDARGS];
 	cc_uint16 port;
 
@@ -102,7 +83,7 @@ static int Program_Run(int argc, char** argv) {
 
 	if (argsCount == 0) {
 #ifdef CC_BUILD_WEB
-		String_AppendConst(&Game_Username, "WebTest!");
+		String_AppendConst(&Game_Username, DEFAULT_USERNAME);
 		RunGame();
 #else
 		Launcher_Run();
@@ -111,6 +92,11 @@ static int Program_Run(int argc, char** argv) {
 		args[0] = String_UNSAFE_SubstringAt(&args[0], 1);
 		String_Copy(&Launcher_AutoHash, &args[0]);
 		Launcher_Run();
+	/* File path to auto load a map in singleplayer */
+	} else if (argsCount == 1 && SP_HasDir(args[0]) && File_Exists(&args[0])) {
+		Options_Get(LOPT_USERNAME, &Game_Username, DEFAULT_USERNAME);
+		String_Copy(&SP_AutoloadMap, &args[0]); /* TODO: don't copy args? */
+		RunGame();
 #endif
 	} else if (argsCount == 1) {
 		String_Copy(&Game_Username, &args[0]);
@@ -133,69 +119,43 @@ static int Program_Run(int argc, char** argv) {
 	return 0;
 }
 
+#if defined CC_BUILD_IOS
+/* ClassiCube is sort of and sort of not the executable */
+/*  on iOS - UIKit is responsible for kickstarting the game. */
+/* (this is handled in interop_ios.m as the code is Objective C) */
+int ios_main(int argc, char** argv) {
+	SetupProgram(argc, argv);
+	for (;;) { RunProgram(argc, argv); }
+	return 0;
+}
+#elif defined CC_BUILD_ANDROID
+/* ClassiCube is just a native library on android, */
+/*  unlike other platforms where it is the executable. */
+/* (activity java class is responsible for kickstarting the game,
+    see Platform_Android.c for the code that actually calls this) */
+void android_main(void) {
+	Platform_LogConst("Main loop started!");
+	SetupProgram(0, NULL);
+	for (;;) { RunProgram(0, NULL); }
+}
+#else
 /* NOTE: main_real is used for when compiling with MingW without linking to startup files. */
 /*  Normally, the final code produced for "main" is our "main" combined with crt's main */
-/*  (mingw-w64-crt/crt/gccmain.c)) - alas this immediately crashes the game on startup. */
+/*  (mingw-w64-crt/crt/gccmain.c) - alas this immediately crashes the game on startup. */
 /* Using main_real instead and setting main_real as the entrypoint fixes the crash. */
-#ifdef CC_NOMAIN
+#if defined CC_NOMAIN
 int main_real(int argc, char** argv) {
+#elif defined CC_BUILD_WEB
+/* webclient does some asynchronous initialisation first, then kickstarts the game after that */
+int web_main(int argc, char** argv) {
 #else 
 int main(int argc, char** argv) {
 #endif
-	static char ipBuffer[STRING_SIZE];
 	cc_result res;
-	Logger_Hook();
-	Platform_Init();
-	Window_Init();
-	
-	res = Platform_SetDefaultCurrentDirectory(argc, argv);
-	if (res) Logger_SysWarn(res, "setting current directory");
-#ifdef CC_TEST_VORBIS
-	main_imdct();
-#endif
-	Platform_LogConst("Starting " GAME_APP_NAME " ..");
-	String_InitArray(Server.Address, ipBuffer);
-	Options_Load();
+	SetupProgram(argc, argv);
 
-	res = Program_Run(argc, argv);
+	res = RunProgram(argc, argv);
 	Process_Exit(res);
 	return res;
-}
-
-/* ClassiCube is just a native library on android, */
-/*  unlike other platforms where it is the executable. */
-/* As such, we have to hook into the java-side activity, */
-/*  which in its onCreate() calls runGameAsync to */
-/*  actually run the game on a separate thread. */
-#ifdef CC_BUILD_ANDROID
-static void android_main(void) {
-	Platform_LogConst("Main loop started!");
-	main(0, NULL); 
-}
-
-static void JNICALL java_runGameAsync(JNIEnv* env, jobject instance) {
-	void* thread;
-	App_Instance = (*env)->NewGlobalRef(env, instance);
-	/* TODO: Do we actually need to remove that global ref later? */
-
-	Platform_LogConst("Running game async!");
-	thread = Thread_Start(android_main);
-	Thread_Detach(thread);
-}
-
-static const JNINativeMethod methods[1] = {
-	{ "runGameAsync", "()V", java_runGameAsync }
-};
-
-CC_API jint JNI_OnLoad(JavaVM* vm, void* reserved) {
-	jclass klass;
-	JNIEnv* env;
-	VM_Ptr = vm;
-	JavaGetCurrentEnv(env);
-
-	klass     = (*env)->FindClass(env, "com/classicube/MainActivity");
-	App_Class = (*env)->NewGlobalRef(env, klass);
-	JavaRegisterNatives(env, methods);
-	return JNI_VERSION_1_4;
 }
 #endif

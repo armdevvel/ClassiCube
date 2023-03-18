@@ -14,8 +14,9 @@
 #include "Errors.h"
 #include "Stream.h"
 #include "Chat.h"
-#include "Inventory.h"
 #include "TexturePack.h"
+#include "Utils.h"
+static cc_bool calcDefaultSpawn;
 
 
 /*########################################################################################################################*
@@ -41,41 +42,50 @@ static cc_result Map_SkipGZipHeader(struct Stream* stream) {
 }
 
 IMapImporter Map_FindImporter(const cc_string* path) {
-	static const cc_string cw  = String_FromConst(".cw"),  lvl = String_FromConst(".lvl");
-	static const cc_string fcm = String_FromConst(".fcm"), dat = String_FromConst(".dat");
+	static const cc_string cw   = String_FromConst(".cw"),  lvl = String_FromConst(".lvl");
+	static const cc_string fcm  = String_FromConst(".fcm"), dat = String_FromConst(".dat");
+	static const cc_string mine = String_FromConst(".mine");
 
-	if (String_CaselessEnds(path, &cw))  return Cw_Load;
-#ifndef CC_BUILD_WEB
-	if (String_CaselessEnds(path, &lvl)) return Lvl_Load;
-	if (String_CaselessEnds(path, &fcm)) return Fcm_Load;
-	if (String_CaselessEnds(path, &dat)) return Dat_Load;
-#endif
+	if (String_CaselessEnds(path,   &cw))  return Cw_Load;
+	if (String_CaselessEnds(path,  &lvl)) return Lvl_Load;
+	if (String_CaselessEnds(path,  &fcm)) return Fcm_Load;
+	if (String_CaselessEnds(path,  &dat)) return Dat_Load;
+	if (String_CaselessEnds(path, &mine)) return Dat_Load;
 
 	return NULL;
 }
 
-void Map_LoadFrom(const cc_string* path) {
+cc_result Map_LoadFrom(const cc_string* path) {
+	cc_string relPath, fileName, fileExt;
 	IMapImporter importer;
 	struct Stream stream;
 	cc_result res;
 	Game_Reset();
 	
+	calcDefaultSpawn = false;
 	res = Stream_OpenFile(&stream, path);
-	if (res) { Logger_SysWarn2(res, "opening", path); return; }
+	if (res) { Logger_SysWarn2(res, "opening", path); return res; }
 
 	importer = Map_FindImporter(path);
 	if (!importer) {
-		Logger_SysWarn2(ERR_NOT_SUPPORTED, "decoding", path);
+		res = ERR_NOT_SUPPORTED;
 	} else if ((res = importer(&stream))) {
 		World_Reset();
-		Logger_SysWarn2(res, "decoding", path);
 	}
 
-	res = stream.Close(&stream);
-	if (res) { Logger_SysWarn2(res, "closing", path); }
+	/* No point logging error for closing readonly file */
+	(void)stream.Close(&stream);
+	if (res) Logger_SysWarn2(res, "decoding", path);
 
 	World_SetNewMap(World.Blocks, World.Width, World.Height, World.Length);
+	if (calcDefaultSpawn) LocalPlayer_CalcDefaultSpawn();
 	LocalPlayer_MoveToSpawn();
+
+	relPath = *path;
+	Utils_UNSAFE_GetFilename(&relPath);
+	String_UNSAFE_Separate(&relPath, '.', &fileName, &fileExt);
+	String_Copy(&World.Name, &fileName);
+	return res;
 }
 
 
@@ -204,7 +214,17 @@ cc_result Lvl_Load(struct Stream* stream) {
 	if (res == ERR_END_OF_STREAM) return 0;
 
 	if (res) return res;
-	return section == 0xBD ? Lvl_ReadCustomBlocks(&compStream) : 0;
+	/* Unrecognised section type, stop reading */
+	if (section != 0xBD) return 0;
+
+	res = Lvl_ReadCustomBlocks(&compStream);
+	/* At least one map out there has a corrupted 0xBD section */
+	if (res == ERR_END_OF_STREAM) {
+		Chat_AddRaw("&cEnd of stream reading .lvl custom blocks section");
+		Chat_AddRaw("&c  Some blocks may therefore appear incorrectly");
+		res = 0;
+	}
+	return res;
 }
 
 
@@ -282,7 +302,7 @@ cc_result Fcm_Load(struct Stream* stream) {
 *#########################################################################################################################*/
 enum NbtTagType { 
 	NBT_END, NBT_I8,  NBT_I16, NBT_I32,  NBT_I64, NBT_F32, 
-	NBT_R64, NBT_I8S, NBT_STR, NBT_LIST, NBT_DICT
+	NBT_F64, NBT_I8S, NBT_STR, NBT_LIST, NBT_DICT
 };
 
 #define NBT_SMALL_SIZE  STRING_SIZE
@@ -300,6 +320,7 @@ struct NbtTag {
 		cc_uint8  u8;
 		cc_int16  i16;
 		cc_uint16 u16;
+		cc_int32  i32;
 		cc_uint32 u32;
 		float     f32;
 		cc_uint8  small[NBT_SMALL_SIZE];
@@ -311,35 +332,56 @@ struct NbtTag {
 };
 
 static cc_uint8 NbtTag_U8(struct NbtTag* tag) {
-	if (tag->type != NBT_I8) Logger_Abort("Expected I8 NBT tag");
-	return tag->value.u8;
+	if (tag->type == NBT_I8) return tag->value.u8; 
+	
+	tag->result = NBT_ERR_EXPECTED_I8;
+	return 0;
 }
 
 static cc_int16 NbtTag_I16(struct NbtTag* tag) {
-	if (tag->type != NBT_I16) Logger_Abort("Expected I16 NBT tag");
-	return tag->value.i16;
+	if (tag->type == NBT_I16) return tag->value.i16;
+	if (tag->type == NBT_I8)  return tag->value.u8;
+
+	tag->result = NBT_ERR_EXPECTED_I16;
+	return 0;
 }
 
 static cc_uint16 NbtTag_U16(struct NbtTag* tag) {
-	if (tag->type != NBT_I16) Logger_Abort("Expected I16 NBT tag");
-	return tag->value.u16;
+	if (tag->type == NBT_I16) return tag->value.u16;
+	if (tag->type == NBT_I8)  return tag->value.u8;
+
+	tag->result = NBT_ERR_EXPECTED_I16;
+	return 0;
+}
+
+static int NbtTag_I32(struct NbtTag* tag) {
+	if (tag->type == NBT_I32) return tag->value.i32;
+	if (tag->type == NBT_I16) return tag->value.i16;
+	if (tag->type == NBT_I8)  return tag->value.u8;
+
+	tag->result = NBT_ERR_EXPECTED_I32;
+	return 0;
 }
 
 static float NbtTag_F32(struct NbtTag* tag) {
-	if (tag->type != NBT_F32) Logger_Abort("Expected F32 NBT tag");
-	return tag->value.f32;
+	if (tag->type == NBT_F32) return tag->value.f32;
+
+	tag->result = NBT_ERR_EXPECTED_F32;
+	return 0;
 }
 
 static cc_uint8* NbtTag_U8_Array(struct NbtTag* tag, int minSize) {
-	if (tag->type != NBT_I8S) Logger_Abort("Expected I8_Array NBT tag");
-	if (tag->dataSize < minSize) Logger_Abort("I8_Array NBT tag too small");
+	if (tag->type != NBT_I8S)    { tag->result = NBT_ERR_EXPECTED_ARR;  return NULL; }
+	if (tag->dataSize < minSize) { tag->result = NBT_ERR_ARR_TOO_SMALL; return NULL; }
 
 	return NbtTag_IsSmall(tag) ? tag->value.small : tag->value.big;
 }
 
 static cc_string NbtTag_String(struct NbtTag* tag) {
-	if (tag->type != NBT_STR) Logger_Abort("Expected String NBT tag");
-	return tag->value.str.text;
+	if (tag->type == NBT_STR) return tag->value.str.text;
+
+	tag->result = NBT_ERR_EXPECTED_STR;
+	return String_Empty;
 }
 
 static cc_result Nbt_ReadString(struct Stream* stream, cc_string* str) {
@@ -389,7 +431,7 @@ static cc_result Nbt_ReadTag(cc_uint8 typeId, cc_bool readTagName, struct Stream
 		res = Stream_ReadU32_BE(stream, &tag.value.u32);
 		break;
 	case NBT_I64:
-	case NBT_R64:
+	case NBT_F64:
 		res = stream->Skip(stream, 8);
 		break; /* (8) data */
 
@@ -443,6 +485,81 @@ static cc_result Nbt_ReadTag(cc_uint8 typeId, cc_bool readTagName, struct Stream
 	return tag.result;
 }
 #define IsTag(tag, tagName) (String_CaselessEqualsConst(&tag->name, tagName))
+
+static cc_uint8* Nbt_WriteConst(cc_uint8* data, const char* text) {
+	int i, len = String_Length(text);
+	*data++ = 0;
+	*data++ = (cc_uint8)len;
+
+	for (i = 0; i < len; i++) { *data++ = text[i]; }
+	return data;
+}
+
+static cc_uint8* Nbt_WriteString(cc_uint8* data, const char* name, const cc_string* text) {
+	cc_uint8* start; int i;
+
+	*data++ = NBT_STR;
+	data    = Nbt_WriteConst(data, name);
+	start   = data;
+	data += 2; /* length written later */
+
+	for (i = 0; i < text->length; i++) {
+		data = Convert_CP437ToUtf8(text->buffer[i], data) + data;
+	}
+
+	Stream_SetU16_BE(start, (int)(data - start) - 2);
+	return data;
+}
+
+static cc_uint8* Nbt_WriteDict(cc_uint8* data, const char* name) {
+	*data++ = NBT_DICT;
+	data    = Nbt_WriteConst(data, name);
+
+	return data;
+}
+
+static cc_uint8* Nbt_WriteArray(cc_uint8* data, const char* name, int size) {
+	*data++ = NBT_I8S;
+	data    = Nbt_WriteConst(data, name);
+
+	Stream_SetU32_BE(data, size);
+	return data + 4;
+}
+
+static cc_uint8* Nbt_WriteUInt8(cc_uint8* data, const char* name, cc_uint8 value) {
+	*data++ = NBT_I8;
+	data  = Nbt_WriteConst(data, name);
+
+	*data = value;
+	return data + 1;
+}
+
+static cc_uint8* Nbt_WriteUInt16(cc_uint8* data, const char* name, cc_uint16 value) {
+	*data++ = NBT_I16;
+	data    = Nbt_WriteConst(data, name);
+
+	Stream_SetU16_BE(data, value);
+	return data + 2;
+}
+
+static cc_uint8* Nbt_WriteInt32(cc_uint8* data, const char* name, int value) {
+	*data++ = NBT_I32;
+	data    = Nbt_WriteConst(data, name);
+
+	Stream_SetU32_BE(data, value);
+	return data + 4;
+}
+
+static cc_uint8* Nbt_WriteFloat(cc_uint8* data, const char* name, float value) {
+	union IntAndFloat raw;
+	*data++ = NBT_F32;
+	data    = Nbt_WriteConst(data, name);
+
+	raw.f = value;
+	Stream_SetU32_BE(data, raw.u);
+	return data + 4;
+}
+
 
 /*########################################################################################################################*
 *--------------------------------------------------ClassicWorld format----------------------------------------------------*
@@ -524,6 +641,11 @@ static void Cw_Callback_1(struct NbtTag* tag) {
 
 static void Cw_Callback_2(struct NbtTag* tag) {
 	struct LocalPlayer* p = &LocalPlayer_Instance;
+
+	if (IsTag(tag->parent, "MapGenerator")) {
+		if (IsTag(tag, "Seed")) { World.Seed = NbtTag_I32(tag); return; }
+		return;
+	}
 	if (!IsTag(tag->parent, "Spawn")) return;
 	
 	if (IsTag(tag, "X")) { p->Spawn.X = NbtTag_I16(tag); return; }
@@ -535,7 +657,7 @@ static void Cw_Callback_2(struct NbtTag* tag) {
 
 static BlockID cw_curID;
 static int cw_colR, cw_colG, cw_colB;
-static PackedCol Cw_ParseCol(PackedCol defValue) {
+static PackedCol Cw_ParseColor(PackedCol defValue) {
 	int r = cw_colR, g = cw_colG, b = cw_colB;
 	if (r > 255 || g > 255 || b > 255) return defValue;
 	return PackedCol_Make(r, g, b, 255);
@@ -567,19 +689,35 @@ static void Cw_Callback_4(struct NbtTag* tag) {
 		}
 	}
 
+	if (IsTag(tag->parent, "EnvMapAspect")) {
+		if (IsTag(tag, "EdgeBlock"))    { Env.EdgeBlock    = NbtTag_U16(tag); return; }
+		if (IsTag(tag, "SideBlock"))    { Env.SidesBlock   = NbtTag_U16(tag); return; }
+		if (IsTag(tag, "EdgeHeight"))   { Env.EdgeHeight   = NbtTag_I32(tag); return; }
+		if (IsTag(tag, "SidesOffset"))  { Env.SidesOffset  = NbtTag_I32(tag); return; }
+		if (IsTag(tag, "CloudsHeight")) { Env.CloudsHeight = NbtTag_I32(tag); return; }
+		if (IsTag(tag, "CloudsSpeed"))  { Env.CloudsSpeed  = NbtTag_F32(tag); return; }
+		if (IsTag(tag, "WeatherSpeed")) { Env.WeatherSpeed   = NbtTag_F32(tag); return; }
+		if (IsTag(tag, "WeatherFade"))  { Env.WeatherFade    = NbtTag_F32(tag); return; }
+		if (IsTag(tag, "ExpFog"))       { Env.ExpFog         = NbtTag_U8(tag);  return; }
+		if (IsTag(tag, "SkyboxHor"))    { Env.SkyboxHorSpeed = NbtTag_F32(tag); return; }
+		if (IsTag(tag, "SkyboxVer"))    { Env.SkyboxVerSpeed = NbtTag_F32(tag); return; }
+	}
+
 	/* Callback for compound tag is called after all its children have been processed */
 	if (IsTag(tag->parent, "EnvColors")) {
 		if (IsTag(tag, "Sky")) {
-			Env.SkyCol    = Cw_ParseCol(ENV_DEFAULT_SKY_COL); return;
+			Env.SkyCol    = Cw_ParseColor(ENV_DEFAULT_SKY_COLOR); return;
 		} else if (IsTag(tag, "Cloud")) {
-			Env.CloudsCol = Cw_ParseCol(ENV_DEFAULT_CLOUDS_COL); return;
+			Env.CloudsCol = Cw_ParseColor(ENV_DEFAULT_CLOUDS_COLOR); return;
 		} else if (IsTag(tag, "Fog")) {
-			Env.FogCol    = Cw_ParseCol(ENV_DEFAULT_FOG_COL); return;
+			Env.FogCol    = Cw_ParseColor(ENV_DEFAULT_FOG_COLOR); return;
 		} else if (IsTag(tag, "Sunlight")) {
-			Env_SetSunCol(Cw_ParseCol(ENV_DEFAULT_SUN_COL)); return;
+			Env_SetSunCol(Cw_ParseColor(ENV_DEFAULT_SUN_COLOR)); return;
 		} else if (IsTag(tag, "Ambient")) {
-			Env_SetShadowCol(Cw_ParseCol(ENV_DEFAULT_SHADOW_COL)); return;
-		}
+			Env_SetShadowCol(Cw_ParseColor(ENV_DEFAULT_SHADOW_COLOR)); return;
+		} else if (IsTag(tag, "Skybox")) {
+			Env.SkyboxCol = Cw_ParseColor(ENV_DEFAULT_SKYBOX_COLOR); return;
+		} 
 	}
 
 	if (IsTag(tag->parent, "BlockDefinitions") && Game_AllowCustomBlocks) {
@@ -594,7 +732,7 @@ static void Cw_Callback_4(struct NbtTag* tag) {
 			Blocks.SpriteOffset[id] = 0;
 		}
 
-		Block_DefineCustom(id);
+		Block_DefineCustom(id, false);
 		Blocks.CanPlace[id]  = true;
 		Blocks.CanDelete[id] = true;
 		Event_RaiseVoid(&BlockEvents.PermissionsChanged);
@@ -620,7 +758,7 @@ static void Cw_Callback_5(struct NbtTag* tag) {
 	if (IsTag(tag->parent->parent, "BlockDefinitions") && Game_AllowCustomBlocks) {
 		if (IsTag(tag, "ID"))             { cw_curID = NbtTag_U8(tag);  return; }
 		if (IsTag(tag, "ID2"))            { cw_curID = NbtTag_U16(tag); return; }
-		if (IsTag(tag, "CollideType"))    { Block_SetCollide(id, NbtTag_U8(tag)); return; }
+		if (IsTag(tag, "CollideType"))    { Blocks.Collide[id] = NbtTag_U8(tag); return; }
 		if (IsTag(tag, "Speed"))          { Blocks.SpeedMultiplier[id] = NbtTag_F32(tag); return; }
 		if (IsTag(tag, "TransmitsLight")) { Blocks.BlocksLight[id] = NbtTag_U8(tag) == 0; return; }
 		if (IsTag(tag, "FullBright"))     { Blocks.FullBright[id] = NbtTag_U8(tag) != 0; return; }
@@ -635,6 +773,8 @@ static void Cw_Callback_5(struct NbtTag* tag) {
 
 		if (IsTag(tag, "Textures")) {
 			arr = NbtTag_U8_Array(tag, 6);
+			if (!arr) return;
+
 			Block_Tex(id, FACE_YMAX) = arr[0]; Block_Tex(id, FACE_YMIN) = arr[1];
 			Block_Tex(id, FACE_XMIN) = arr[2]; Block_Tex(id, FACE_XMAX) = arr[3];
 			Block_Tex(id, FACE_ZMIN) = arr[4]; Block_Tex(id, FACE_ZMAX) = arr[5];
@@ -658,6 +798,8 @@ static void Cw_Callback_5(struct NbtTag* tag) {
 
 		if (IsTag(tag, "Fog")) {
 			arr = NbtTag_U8_Array(tag, 4);
+			if (!arr) return;
+
 			Blocks.FogDensity[id] = (arr[0] + 1) / 128.0f;
 			/* Fix for older ClassicalSharp versions which saved wrong fog density value */
 			if (arr[0] == 0xFF) Blocks.FogDensity[id] = 0.0f;
@@ -667,6 +809,8 @@ static void Cw_Callback_5(struct NbtTag* tag) {
 
 		if (IsTag(tag, "Coords")) {
 			arr = NbtTag_U8_Array(tag, 6);
+			if (!arr) return;
+
 			Blocks.MinBB[id].X = (cc_int8)arr[0] / 16.0f; Blocks.MaxBB[id].X = (cc_int8)arr[3] / 16.0f;
 			Blocks.MinBB[id].Y = (cc_int8)arr[1] / 16.0f; Blocks.MaxBB[id].Y = (cc_int8)arr[4] / 16.0f;
 			Blocks.MinBB[id].Z = (cc_int8)arr[2] / 16.0f; Blocks.MaxBB[id].Z = (cc_int8)arr[5] / 16.0f;
@@ -706,9 +850,9 @@ cc_result Cw_Load(struct Stream* stream) {
 
 
 /*########################################################################################################################*
-*-------------------------------------------------Minecraft .dat format---------------------------------------------------*
+*-----------------------------------------------Java serialisation format-------------------------------------------------*
 *#########################################################################################################################*/
-/* .dat is a java serialised map format. Rather than bothering following this, I skip a lot of it.
+/* Rather than bothering following this, I skip a lot of the java serialisation format
      Stream              BlockData        BlockDataTiny      BlockDataLong
 |--------------|     |---------------|  |---------------|  |---------------| 
 | U16 Magic    |     |>BlockDataTiny |  | TC_BLOCKDATA  |  | TC_BLOCKLONG  |
@@ -728,33 +872,63 @@ cc_result Cw_Load(struct Stream* stream) {
 }*/
 enum JTypeCode {
 	TC_NULL = 0x70, TC_REFERENCE = 0x71, TC_CLASSDESC = 0x72, TC_OBJECT = 0x73, 
-	TC_STRING = 0x74, TC_ARRAY = 0x75, TC_ENDBLOCKDATA = 0x78
+	TC_STRING = 0x74, TC_ARRAY = 0x75, TC_BLOCKDATA = 0x77, TC_ENDBLOCKDATA = 0x78
 };
 enum JFieldType {
-	JFIELD_I8 = 'B', JFIELD_F32 = 'F', JFIELD_I32 = 'I', JFIELD_I64 = 'J',
+	JFIELD_I8 = 'B', JFIELD_F64 = 'D', JFIELD_F32 = 'F', JFIELD_I32 = 'I', JFIELD_I64 = 'J',
 	JFIELD_BOOL = 'Z', JFIELD_ARRAY = '[', JFIELD_OBJECT = 'L'
 };
 
 #define JNAME_SIZE 48
+#define SC_WRITE_METHOD 0x01
+#define SC_SERIALIZABLE 0x02
+
+static cc_uint32 reference_id;
+#define Java_AddReference() reference_id++;
+
+union JValue {
+	cc_uint8  U8;
+	cc_int32  I32;
+	cc_uint32 U32;
+	float     F32;
+	struct { cc_uint8* Ptr; cc_uint32 Size; } Array;
+};
+
 struct JFieldDesc {
 	cc_uint8 Type;
 	cc_uint8 FieldName[JNAME_SIZE];
+	union JValue Value; 
+	/* "Value" field here is not accurate to how java deserialising actually works, */
+	/*  but easier to store here since only care about Level class values anyways */
+};
+
+struct JClassDesc;
+struct JClassDesc {
+	cc_uint8 ClassName[JNAME_SIZE];
+	cc_uint8 Flags;
+	int FieldsCount;
+	struct JFieldDesc Fields[38];
+	cc_uint32 Reference;
+	struct JClassDesc* SuperClass;
+	struct JClassDesc* tmp;
+};
+
+struct JArray {
+	struct JClassDesc* Desc;
+	cc_uint8* Data; /* for byte arrays */
+	cc_uint32 Size; /* for byte arrays */
+};
+
+struct JUnion {
+	cc_uint8 Type;
 	union {
-		cc_uint8  U8;
-		cc_int32  I32;
-		cc_uint32 U32;
-		float    F32;
-		struct { cc_uint8* Ptr; cc_uint32 Size; } Array;
+		cc_uint8 String[JNAME_SIZE]; /* TC_STRING */
+		struct JClassDesc* Object;   /* TC_OBJECT */
+		struct JArray      Array;    /* TC_ARRAY */
 	} Value;
 };
 
-struct JClassDesc {
-	cc_uint8 ClassName[JNAME_SIZE];
-	int FieldsCount;
-	struct JFieldDesc Fields[22];
-};
-
-static cc_result Dat_ReadString(struct Stream* stream, cc_uint8* buffer) {
+static cc_result Java_ReadString(struct Stream* stream, cc_uint8* buffer) {
 	int len;
 	cc_result res;
 
@@ -762,391 +936,604 @@ static cc_result Dat_ReadString(struct Stream* stream, cc_uint8* buffer) {
 	len = Stream_GetU16_BE(buffer);
 
 	Mem_Set(buffer, 0, JNAME_SIZE);
-	if (len > JNAME_SIZE) return DAT_ERR_JSTRING_LEN;
+	if (len > JNAME_SIZE) return JAVA_ERR_JSTRING_LEN;
 	return Stream_Read(stream, buffer, len);
 }
 
-static cc_result Dat_ReadFieldDesc(struct Stream* stream, struct JFieldDesc* desc) {
-	cc_uint8 typeCode;
-	cc_uint8 className1[JNAME_SIZE];
+
+static cc_result Java_ReadObject(struct Stream* stream,     struct JUnion* object);
+static cc_result Java_ReadObjectData(struct Stream* stream, struct JUnion* object);
+static cc_result Java_SkipAnnotation(struct Stream* stream) {
+	cc_uint8 typeCode, count;
+	struct JUnion object;
 	cc_result res;
 
-	if ((res = stream->ReadU8(stream, &desc->Type)))     return res;
-	if ((res = Dat_ReadString(stream, desc->FieldName))) return res;
-
-	if (desc->Type == JFIELD_ARRAY || desc->Type == JFIELD_OBJECT) {		
+	for (;;)
+	{
 		if ((res = stream->ReadU8(stream, &typeCode))) return res;
 
-		if (typeCode == TC_STRING) {
-			return Dat_ReadString(stream, className1);
-		} else if (typeCode == TC_REFERENCE) {
-			return stream->Skip(stream, 4); /* (4) handle */
-		} else {
-			return DAT_ERR_JFIELD_CLASS_NAME;
+		switch (typeCode)
+		{
+		case TC_BLOCKDATA:
+			if ((res = stream->ReadU8(stream, &count))) return res;
+			if ((res = stream->Skip(stream, count)))    return res;
+			break;
+		case TC_ENDBLOCKDATA: 
+			return 0;
+		default:
+			object.Type = typeCode;
+			if ((res = Java_ReadObjectData(stream, &object))) return res;
+			break;
 		}
 	}
 	return 0;
 }
 
-static cc_result Dat_ReadClassDesc(struct Stream* stream, struct JClassDesc* desc) {
-	cc_uint8 typeCode;
+
+/* Most .dat maps only use at most 16 different class types */
+/*  However some survival test maps can use up to 30 */
+#define CLASS_CAPACITY 30
+static struct JClassDesc* class_cache;
+static int class_count;
+static cc_result Java_ReadClassDesc(struct Stream* stream, struct JClassDesc** desc);
+
+static cc_result Java_ReadFieldDesc(struct Stream* stream, struct JFieldDesc* desc) {
+	struct JUnion className;
+	cc_result res;
+
+	if ((res = stream->ReadU8(stream, &desc->Type)))      return res;
+	if ((res = Java_ReadString(stream, desc->FieldName))) return res;
+
+	if (desc->Type == JFIELD_ARRAY || desc->Type == JFIELD_OBJECT) {		
+		return Java_ReadObject(stream, &className);
+	}
+	return 0;
+}
+
+static cc_result Java_ReadNewClassDesc(struct Stream* stream, struct JClassDesc* desc) {
 	cc_uint8 count[2];
-	struct JClassDesc superClassDesc;
 	cc_result res;
 	int i;
 
-	if ((res = stream->ReadU8(stream, &typeCode))) return res;
-	if (typeCode == TC_NULL) { desc->ClassName[0] = '\0'; desc->FieldsCount = 0; return 0; }
-	if (typeCode != TC_CLASSDESC) return DAT_ERR_JCLASS_TYPE;
+	if ((res = Java_ReadString(stream, desc->ClassName))) return res;
+	if ((res = stream->Skip(stream, 8)))                  return res; /* serial version UID */
+	if ((res = stream->ReadU8(stream, &desc->Flags)))     return res;
 
-	if ((res = Dat_ReadString(stream, desc->ClassName))) return res;
-	if ((res = stream->Skip(stream, 9))) return res; /* (8) serial version UID, (1) flags */
+	desc->Reference = reference_id;
+	Java_AddReference();
 
 	if ((res = Stream_Read(stream, count, 2))) return res;
 	desc->FieldsCount = Stream_GetU16_BE(count);
-	if (desc->FieldsCount > Array_Elems(desc->Fields)) return DAT_ERR_JCLASS_FIELDS;
+	if (desc->FieldsCount > Array_Elems(desc->Fields)) return JAVA_ERR_JCLASS_FIELDS;
 	
 	for (i = 0; i < desc->FieldsCount; i++) {
-		if ((res = Dat_ReadFieldDesc(stream, &desc->Fields[i]))) return res;
+		if ((res = Java_ReadFieldDesc(stream, &desc->Fields[i]))) return res;
 	}
 
-	if ((res = stream->ReadU8(stream, &typeCode))) return res;
-	if (typeCode != TC_ENDBLOCKDATA) return DAT_ERR_JCLASS_ANNOTATION;
-
-	return Dat_ReadClassDesc(stream, &superClassDesc);
+	if ((res = Java_SkipAnnotation(stream))) return res;
+	return Java_ReadClassDesc(stream, &desc->SuperClass);
 }
 
-static cc_result Dat_ReadFieldData(struct Stream* stream, struct JFieldDesc* field) {
+static cc_result Java_ReadClassDesc(struct Stream* stream, struct JClassDesc** desc) {
 	cc_uint8 typeCode;
-	cc_string fieldName;
-	cc_uint32 count;
-	struct JClassDesc arrayClassDesc;
+	cc_uint32 reference;
+	cc_result res;
+	int i;
+	if ((res = stream->ReadU8(stream, &typeCode))) return res;
+
+	switch (typeCode)
+	{
+		case TC_NULL:
+			*desc = NULL;
+			return 0;
+
+		case TC_REFERENCE:
+			if ((res = Stream_ReadU32_BE(stream, &reference))) return res;
+
+			/* Use a previously defined ClassDescriptor */
+			for (i = 0; i < class_count; i++) 
+			{
+				if (class_cache[i].Reference != reference) continue;
+				
+				*desc = &class_cache[i];
+				return 0;
+			}
+			return JAVA_ERR_JCLASS_REFERENCE;
+
+		case TC_CLASSDESC:
+			if (class_count >= CLASS_CAPACITY) return JAVA_ERR_JCLASSES_COUNT;
+
+			*desc = &class_cache[class_count++];
+			return Java_ReadNewClassDesc(stream, *desc);
+	}
+	return JAVA_ERR_JCLASS_TYPE;
+}
+
+
+static cc_result Java_ReadValue(struct Stream* stream, cc_uint8 type, union JValue* value) {
+	struct JUnion obj;
 	cc_result res;
 
-	switch (field->Type) {
+	switch (type) {
 	case JFIELD_I8:
 	case JFIELD_BOOL:
-		return stream->ReadU8(stream, &field->Value.U8);
+		return stream->ReadU8(stream, &value->U8);
 	case JFIELD_F32:
 	case JFIELD_I32:
-		return Stream_ReadU32_BE(stream, &field->Value.U32);
+		return Stream_ReadU32_BE(stream, &value->U32);
+	case JFIELD_F64:
 	case JFIELD_I64:
 		return stream->Skip(stream, 8); /* (8) data */
+	case JFIELD_OBJECT:
+		return Java_ReadObject(stream, &obj);
 
-	case JFIELD_OBJECT: {
-		/* Luckily for us, we only have to account for blockMap object */
-		/* Other objects (e.g. player) are stored after the fields we actually care about, so ignore them */
-		fieldName = String_FromRaw((char*)field->FieldName, JNAME_SIZE);
-		if (!String_CaselessEqualsConst(&fieldName, "blockMap")) return 0;
-		if ((res = stream->ReadU8(stream, &typeCode))) return res;
+	case JFIELD_ARRAY:
+		if ((res = Java_ReadObject(stream, &obj))) return res;
+		value->Array.Size = 0;
+		value->Array.Ptr  = NULL;
 
-		/* Skip all blockMap data with awful hacks */
-		/* These offsets were based on server_level.dat map from original minecraft classic server */
-		if (typeCode == TC_OBJECT) {
-			if ((res = stream->Skip(stream, 315)))         return res;
-			if ((res = Stream_ReadU32_BE(stream, &count))) return res;
-
-			if ((res = stream->Skip(stream, 17 * count)))  return res;
-			if ((res = stream->Skip(stream, 152)))         return res;
-		} else if (typeCode != TC_NULL) {
-			/* WoM maps have this field as null, which makes things easier for us */
-			return DAT_ERR_JOBJECT_TYPE;
+		/* Array is a byte array */
+		/* NOTE: This can technically leak memory if this array is discarded, however */
+		/*  so far the only observed byte array in .dat files is the map blocks anyways */
+		if (obj.Type == TC_ARRAY && obj.Value.Array.Desc->ClassName[1] == JFIELD_I8) {
+			value->Array.Size = obj.Value.Array.Size;
+			value->Array.Ptr  = obj.Value.Array.Data;
 		}
-	} break;
+		return 0;
+	}
+	return JAVA_ERR_JVALUE_TYPE;
+}
 
-	case JFIELD_ARRAY: {
-		if ((res = stream->ReadU8(stream, &typeCode))) return res;
-		/* NULL/empty array */
-		if (typeCode == TC_NULL) {
-			field->Value.Array.Size = 0;
-			field->Value.Array.Ptr  = NULL;
-			break;
-		}
+static cc_result Java_ReadClassData(struct Stream* stream, struct JClassDesc* desc) {
+	struct JFieldDesc* field;
+	cc_result res;
+	int i;
 
-		if (typeCode != TC_ARRAY) return DAT_ERR_JARRAY_TYPE;
-		if ((res = Dat_ReadClassDesc(stream, &arrayClassDesc))) return res;
-		if (arrayClassDesc.ClassName[1] != JFIELD_I8) return DAT_ERR_JARRAY_CONTENT;
+	if (!(desc->Flags & SC_SERIALIZABLE))
+		return JAVA_ERR_JOBJECT_FLAGS;
 
-		if ((res = Stream_ReadU32_BE(stream, &count))) return res;
-		field->Value.Array.Size = count;
-		field->Value.Array.Ptr  = (cc_uint8*)Mem_TryAlloc(count, 1);
+	for (i = 0; i < desc->FieldsCount; i++) 
+	{
+		field = &desc->Fields[i];
+		if ((res = Java_ReadValue(stream, field->Type, &field->Value))) return res;
+	}
 
-		if (!field->Value.Array.Ptr) return ERR_OUT_OF_MEMORY;
-		res = Stream_Read(stream, field->Value.Array.Ptr, count);
-		if (res) { Mem_Free(field->Value.Array.Ptr); return res; }
-	} break;
+	if (desc->Flags & SC_WRITE_METHOD)
+		return Java_SkipAnnotation(stream);
+	return 0;
+}
+
+static cc_result Java_ReadNewString(struct Stream* stream, struct JUnion* object) {
+	Java_AddReference();
+	return Java_ReadString(stream, object->Value.String);
+}
+
+static cc_result Java_ReadNewObject(struct Stream* stream, struct JUnion* object) {
+	struct JClassDesc* head;
+	cc_result res;
+	if ((res = Java_ReadClassDesc(stream, &object->Value.Object))) return res;
+	Java_AddReference();
+
+	/* Linked list of classes, with most superclass fist as head */
+	head = object->Value.Object; head->tmp = NULL;
+	while (head->SuperClass) {
+		head->SuperClass->tmp = head;
+		head = head->SuperClass;
+	}
+
+	/* Class data is read with most superclass first */
+	while (head) {
+		if ((res = Java_ReadClassData(stream, head))) return res;
+		head = head->tmp;
 	}
 	return 0;
 }
 
-static int Dat_I32(struct JFieldDesc* field) {
+static cc_result Java_ReadNewArray(struct Stream* stream, struct JUnion* object) {
+	struct JArray* array = &object->Value.Array;
+	union JValue value;
+	cc_uint32 count;
+	cc_uint8 type;
+	cc_result res;
+	int i;
+
+	if ((res = Java_ReadClassDesc(stream, &array->Desc))) return res;
+	if ((res = Stream_ReadU32_BE(stream, &count)))        return res;
+	type = array->Desc->ClassName[1];
+	Java_AddReference();
+
+	if (type != JFIELD_I8) {
+		/* Not a byte array, so just discard the unnecessary values */
+		for (i = 0; i < count; i++)
+		{
+			if ((res = Java_ReadValue(stream, type, &value))) return res;
+		}
+		return 0;
+	}
+
+	array->Size = count;
+	array->Data = (cc_uint8*)Mem_TryAlloc(count, 1);
+
+	if (!array->Data) return ERR_OUT_OF_MEMORY;
+	res = Stream_Read(stream, array->Data, count);
+	if (res) { Mem_Free(array->Data); }
+	return res;
+}
+
+static cc_result Java_ReadObjectData(struct Stream* stream, struct JUnion* object) {
+	cc_uint32 reference;
+	switch (object->Type) 
+	{
+		case TC_STRING:    return Java_ReadNewString(stream, object);
+		case TC_NULL:      return 0;
+		case TC_REFERENCE: return Stream_ReadU32_BE(stream, &reference);
+		case TC_OBJECT:    return Java_ReadNewObject(stream, object);
+		case TC_ARRAY:     return Java_ReadNewArray(stream,  object);
+	}
+	return JAVA_ERR_INVALID_TYPECODE;
+}
+
+static cc_result Java_ReadObject(struct Stream* stream, struct JUnion* object) {
+	cc_result res;
+	if ((res = stream->ReadU8(stream, &object->Type))) return res;
+	return Java_ReadObjectData(stream, object);
+}
+
+static int Java_I32(struct JFieldDesc* field) {
 	if (field->Type != JFIELD_I32) Logger_Abort("Field type must be Int32");
 	return field->Value.I32;
 }
 
-cc_result Dat_Load(struct Stream* stream) {
-	cc_uint8 header[10];
-	struct JClassDesc obj;
+
+/*########################################################################################################################*
+*-------------------------------------------------Minecraft .dat format---------------------------------------------------*
+*#########################################################################################################################*/
+/* Minecraft Classic used 3 different GZIP compressed binary map formats throughout its various versions
+Preclassic - Classic 0.12:
+    U8* "Blocks"     (256x64x256 array)
+Classic 0.13:
+	U32 "Identifier" (must be 0x271BB788)
+	U8  "Version"    (must be 1)
+	STR "Name"       (ignored)
+	STR "Author"     (ignored)
+	U64 "Creation"   (ignored)
+	U16 "Width"
+	U16 "Length"
+	U16 "Height"
+	U8* "Blocks"
+Classic 0.15 to Classic 0.30:
+	U32 "Identifier" (must be 0x271BB788)
+	U8  "Version"    (must be 2)
+	VAR "Level"      (Java serialised level object instance)
+}*/
+
+static void Dat_Format0And1(void) {
+	/* Formats 0 and 1 don't store spawn position, so use default of map centre */
+	calcDefaultSpawn = true;
+
+	/* Similiar env to how it appears in preclassic - 0.13 classic client */
+	Env.CloudsHeight = -30000;
+	Env.SkyCol       = PackedCol_Make(0x7F, 0xCC, 0xFF, 0xFF);
+	Env.FogCol       = PackedCol_Make(0x7F, 0xCC, 0xFF, 0xFF);
+}
+
+static cc_result Dat_LoadFormat0(struct Stream* stream) {
+	Dat_Format0And1();
+	/* Similiar env to how it appears in preclassic client */
+	Env.EdgeBlock  = BLOCK_AIR;
+	Env.SidesBlock = BLOCK_AIR;
+
+	/* Map 'format' is just the 256x64x256 blocks of the level */
+	World.Width  = 256;
+	World.Height =  64;
+	World.Length = 256;
+
+	#define PC_VOLUME (256 * 64 * 256)
+	World.Volume = PC_VOLUME;
+	World.Blocks = (BlockRaw*)Mem_TryAlloc(PC_VOLUME, 1);
+	if (!World.Blocks) return ERR_OUT_OF_MEMORY;
+
+	/* First 5 bytes already read earlier as .dat header */
+	Mem_Set(World.Blocks, BLOCK_STONE, 5);
+	return Stream_Read(stream, World.Blocks + 5, PC_VOLUME - 5);
+}
+
+static cc_result Dat_LoadFormat1(struct Stream* stream) {
+	cc_uint8 level_name[JNAME_SIZE];
+	cc_uint8 level_author[JNAME_SIZE];
+	cc_uint8 header[8 + 2 + 2 + 2];
+	cc_result res;
+
+	Dat_Format0And1();
+	if ((res = Java_ReadString(stream,   level_name))) return res;
+	if ((res = Java_ReadString(stream, level_author))) return res;
+	if ((res = Stream_Read(stream, header, sizeof(header)))) return res;
+	
+	/* bytes 0-8 = created timestamp (currentTimeMillis) */
+	World.Width  = Stream_GetU16_BE(header +  8);
+	World.Length = Stream_GetU16_BE(header + 10);
+	World.Height = Stream_GetU16_BE(header + 12);
+	return Map_ReadBlocks(stream);
+}
+
+static cc_result Dat_LoadFormat2(struct Stream* stream) {
+	struct LocalPlayer* p = &LocalPlayer_Instance;
+	struct JClassDesc classes[CLASS_CAPACITY];
+	cc_uint8 header[2 + 2];
+	struct JUnion obj;
+	struct JClassDesc* desc;
 	struct JFieldDesc* field;
 	cc_string fieldName;
 	cc_result res;
 	int i;
+	if ((res = Stream_Read(stream, header, sizeof(header)))) return res;
 
-	struct LocalPlayer* p = &LocalPlayer_Instance;
-	struct Stream compStream;
-	struct InflateState state;
-	Inflate_MakeStream2(&compStream, &state, stream);
-
-	if ((res = Map_SkipGZipHeader(stream)))                       return res;
-	if ((res = Stream_Read(&compStream, header, sizeof(header)))) return res;
-	/* .dat header */
-	if (Stream_GetU32_BE(&header[0]) != 0x271BB788) return DAT_ERR_IDENTIFIER;
-	if (header[4] != 0x02) return DAT_ERR_VERSION;
+	/* Reset state for Java Serialisation */
+	class_cache  = classes;
+	class_count  = 0;
+	reference_id = 0x7E0000;
 
 	/* Java seralisation headers */
-	if (Stream_GetU16_BE(&header[5]) != 0xACED) return DAT_ERR_JIDENTIFIER;
-	if (Stream_GetU16_BE(&header[7]) != 0x0005) return DAT_ERR_JVERSION;
-	if (header[9] != TC_OBJECT)                 return DAT_ERR_ROOT_TYPE;
-	if ((res = Dat_ReadClassDesc(&compStream, &obj))) return res;
+	if (Stream_GetU16_BE(header + 0) != 0xACED) return DAT_ERR_JIDENTIFIER;
+	if (Stream_GetU16_BE(header + 2) != 0x0005) return DAT_ERR_JVERSION;
 
-	for (i = 0; i < obj.FieldsCount; i++) {
-		field = &obj.Fields[i];
-		if ((res = Dat_ReadFieldData(&compStream, field))) return res;
+	if ((res = Java_ReadObject(stream, &obj)))  return res;
+	if (obj.Type != TC_OBJECT)                  return DAT_ERR_ROOT_OBJECT;
+	desc = obj.Value.Object;
+
+	for (i = 0; i < desc->FieldsCount; i++) 
+	{
+		field     = &desc->Fields[i];
 		fieldName = String_FromRaw((char*)field->FieldName, JNAME_SIZE);
 
 		if (String_CaselessEqualsConst(&fieldName, "width")) {
-			World.Width  = Dat_I32(field);
+			World.Width  = Java_I32(field);
 		} else if (String_CaselessEqualsConst(&fieldName, "height")) {
-			World.Length = Dat_I32(field);
+			World.Length = Java_I32(field);
 		} else if (String_CaselessEqualsConst(&fieldName, "depth")) {
-			World.Height = Dat_I32(field);
+			World.Height = Java_I32(field);
 		} else if (String_CaselessEqualsConst(&fieldName, "blocks")) {
 			if (field->Type != JFIELD_ARRAY) Logger_Abort("Blocks field must be Array");
 			World.Blocks = field->Value.Array.Ptr;
 			World.Volume = field->Value.Array.Size;
 		} else if (String_CaselessEqualsConst(&fieldName, "xSpawn")) {
-			p->Spawn.X = (float)Dat_I32(field);
+			p->Spawn.X = (float)Java_I32(field);
 		} else if (String_CaselessEqualsConst(&fieldName, "ySpawn")) {
-			p->Spawn.Y = (float)Dat_I32(field);
+			p->Spawn.Y = (float)Java_I32(field);
 		} else if (String_CaselessEqualsConst(&fieldName, "zSpawn")) {
-			p->Spawn.Z = (float)Dat_I32(field);
+			p->Spawn.Z = (float)Java_I32(field);
 		}
 	}
 	return 0;
+}
+
+cc_result Dat_Load(struct Stream* stream) {
+	cc_uint8 header[4 + 1];
+	cc_uint32 signature;
+	cc_result res;
+
+	struct Stream compStream;
+	struct InflateState state;
+	Inflate_MakeStream2(&compStream, &state, stream);
+	if ((res = Map_SkipGZipHeader(stream)))                       return res;
+	if ((res = Stream_Read(&compStream, header, sizeof(header)))) return res;
+
+	signature = Stream_GetU32_BE(header + 0);
+	switch (signature)
+	{
+		/* Classic map format signature */
+	case 0x271BB788: break;
+		/* Not an actual signature, but 99% of preclassic */
+		/*  to classic 0.12 maps start with these 4 bytes */
+	case 0x01010101: return Dat_LoadFormat0(&compStream);
+		/* Bogus .dat file */
+	default:         return DAT_ERR_IDENTIFIER;
+	}
+
+	/* Format version */
+	switch (header[4])
+	{
+		/* Format version 1 = classic 0.13 */
+	case 0x01: return Dat_LoadFormat1(&compStream);
+		/* Format version 2 = classic 0.15 to 0.30 */
+	case 0x02: return Dat_LoadFormat2(&compStream);
+		/* Bogus .dat file */
+	default:   return DAT_ERR_VERSION;
+	}
 }
 
 
 /*########################################################################################################################*
 *--------------------------------------------------ClassicWorld export----------------------------------------------------*
 *#########################################################################################################################*/
-#define CW_META_RGB NBT_I16,0,1,'R',0,0,  NBT_I16,0,1,'G',0,0,  NBT_I16,0,1,'B',0,0,
+static cc_uint8* Cw_WriteColor(cc_uint8* data, const char* name, PackedCol color) {
+	data = Nbt_WriteDict(data, name);
+	{
+		data  = Nbt_WriteUInt16(data, "R", PackedCol_R(color));
+		data  = Nbt_WriteUInt16(data, "G", PackedCol_G(color));
+		data  = Nbt_WriteUInt16(data, "B", PackedCol_B(color));
+	} *data++ = NBT_END;
 
-static int Cw_WriteEndString(cc_uint8* data, const cc_string* text) {
-	cc_uint8* cur = data + 2;
-	int i, wrote, len = 0;
-
-	for (i = 0; i < text->length; i++) {
-		wrote = Convert_CP437ToUtf8(text->buffer[i], cur);
-		len += wrote; cur += wrote;
-	}
-
-	Stream_SetU16_BE(data, len);
-	*cur = NBT_END;
-	return len + 1;
+	return data;
 }
 
-static cc_uint8 cw_begin[131] = {
-NBT_DICT, 0,12, 'C','l','a','s','s','i','c','W','o','r','l','d',
-	NBT_I8,   0,13, 'F','o','r','m','a','t','V','e','r','s','i','o','n', 1,
-	NBT_I8S,  0,4,  'U','U','I','D', 0,0,0,16, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-	NBT_I16,  0,1,  'X', 0,0,
-	NBT_I16,  0,1,  'Y', 0,0,
-	NBT_I16,  0,1,  'Z', 0,0,
-	NBT_DICT, 0,5,  'S','p','a','w','n',
-		NBT_I16,  0,1, 'X', 0,0,
-		NBT_I16,  0,1, 'Y', 0,0,
-		NBT_I16,  0,1, 'Z', 0,0,
-		NBT_I8,   0,1, 'H', 0,
-		NBT_I8,   0,1, 'P', 0,
-	NBT_END,
-	NBT_I8S,  0,10, 'B','l','o','c','k','A','r','r','a','y', 0,0,0,0,
-};
-static cc_uint8 cw_map2[18] = {
-	NBT_I8S,  0,11, 'B','l','o','c','k','A','r','r','a','y','2', 0,0,0,0,
-};
-static cc_uint8 cw_meta_cpe[303] = {
-	NBT_DICT, 0,8,  'M','e','t','a','d','a','t','a',
-		NBT_DICT, 0,3, 'C','P','E',
-			NBT_DICT, 0,13, 'C','l','i','c','k','D','i','s','t','a','n','c','e',
-				NBT_I16,  0,8,  'D','i','s','t','a','n','c','e', 0,0,
-			NBT_END,
-			NBT_DICT, 0,14, 'E','n','v','W','e','a','t','h','e','r','T','y','p','e',
-				NBT_I8,   0,11, 'W','e','a','t','h','e','r','T','y','p','e', 0,
-			NBT_END,
-			NBT_DICT, 0,9,  'E','n','v','C','o','l','o','r','s',
-				NBT_DICT, 0,3, 'S','k','y',                     CW_META_RGB
-				NBT_END,
-				NBT_DICT, 0,5, 'C','l','o','u','d',             CW_META_RGB
-				NBT_END,
-				NBT_DICT, 0,3, 'F','o','g',                     CW_META_RGB
-				NBT_END,
-				NBT_DICT, 0,7, 'A','m','b','i','e','n','t',     CW_META_RGB
-				NBT_END,
-				NBT_DICT, 0,8, 'S','u','n','l','i','g','h','t', CW_META_RGB
-				NBT_END,
-			NBT_END,
-			NBT_DICT, 0,16, 'E','n','v','M','a','p','A','p','p','e','a','r','a','n','c','e',
-				NBT_I8,   0,9,  'S','i','d','e','B','l','o','c','k',     0,
-				NBT_I8,   0,9,  'E','d','g','e','B','l','o','c','k',     0,
-				NBT_I16,  0,9,  'S','i','d','e','L','e','v','e','l',     0,0,
-				NBT_STR,  0,10, 'T','e','x','t','u','r','e','U','R','L', 0,0,
-};
-static cc_uint8 cw_meta_defs[19] = {
-			NBT_DICT, 0,16, 'B','l','o','c','k','D','e','f','i','n','i','t','i','o','n','s',
-};
-static cc_uint8 cw_meta_def[189] = {
-				NBT_DICT, 0,9,  'B','l','o','c','k','\0','\0','\0','\0',
-					NBT_I8,  0,2,  'I','D',                              0,
-					/* It would be have been better to just change ID to be a I16 */
-					/* Unfortunately this isn't backwards compatible with ClassicalSharp */
-					NBT_I16, 0,3,  'I','D','2',                          0,0,
-					NBT_I8,  0,11, 'C','o','l','l','i','d','e','T','y','p','e', 0,
-					NBT_F32, 0,5,  'S','p','e','e','d',                  0,0,0,0,
-					/* Ugly hack for supporting texture IDs over 255 */
-					/* First 6 elements are lower 8 bits, next 6 are upper 8 bits */
-					NBT_I8S, 0,8,  'T','e','x','t','u','r','e','s',      0,0,0,12, 0,0,0,0,0,0, 0,0,0,0,0,0,
-					NBT_I8,  0,14, 'T','r','a','n','s','m','i','t','s','L','i','g','h','t', 0,
-					NBT_I8,  0,9,  'W','a','l','k','S','o','u','n','d',  0,
-					NBT_I8,  0,10, 'F','u','l','l','B','r','i','g','h','t', 0,
-					NBT_I8,  0,5,  'S','h','a','p','e',                  0,
-					NBT_I8,  0,9,  'B','l','o','c','k','D','r','a','w',  0,
-					NBT_I8S, 0,3,  'F','o','g',                          0,0,0,4, 0,0,0,0,
-					NBT_I8S, 0,6,  'C','o','o','r','d','s',              0,0,0,6, 0,0,0,0,0,0,
-					NBT_STR, 0,4,  'N','a','m','e',                      0,0,
-};
-static cc_uint8 cw_end[4] = {
+static const cc_uint8 cw_end[4] = {
 			NBT_END,
 		NBT_END,
 	NBT_END,
 NBT_END,
 };
 
-
 static cc_result Cw_WriteBockDef(struct Stream* stream, int b) {
-	cc_uint8 tmp[512];
+	cc_uint8 buffer[1024];
+	char nameBuffer[10];
+	cc_uint8* cur;
 	cc_string name;
-	int len;
-
 	cc_bool sprite = Blocks.Draw[b] == DRAW_SPRITE;
-	union IntAndFloat speed;
 	TextureLoc tex;
 	cc_uint8 fog;
 	PackedCol col;
 	Vec3 minBB, maxBB;	
 
-	Mem_Copy(tmp, cw_meta_def, sizeof(cw_meta_def));
+	/* Hacky unique tag name for each by using hex of block */
+	String_InitArray_NT(name, nameBuffer);
+	String_AppendConst(&name, "Block");
+	String_AppendHex(&name, b >> 8);
+	String_AppendHex(&name, b);
+	nameBuffer[9] = '\0';
+
+	cur = buffer;
+	cur = Nbt_WriteDict(cur, nameBuffer);
 	{
-		/* Hacky unique tag name for each by using hex of block */
-		name = String_Init((char*)&tmp[8], 0, 4);
-		String_AppendHex(&name, b >> 8);
-		String_AppendHex(&name, b);
-
-		tmp[17] = b;
-		Stream_SetU16_BE(&tmp[24], b);
-
-		tmp[40] = Blocks.Collide[b];
-		speed.f = Blocks.SpeedMultiplier[b];
-		Stream_SetU32_BE(&tmp[49], speed.u);
+		cur  = Nbt_WriteUInt8(cur,  "ID", b);
+		/* It would be have been better to just change ID to be a I16 */
+		/* Unfortunately this isn't backwards compatible with ClassicalSharp */
+		cur  = Nbt_WriteUInt16(cur, "ID2", b);
+		cur  = Nbt_WriteUInt8(cur,  "CollideType", Blocks.Collide[b]);
+		cur  = Nbt_WriteFloat(cur,  "Speed", Blocks.SpeedMultiplier[b]);
 
 		/* Originally only up to 256 textures were supported, which used up 6 bytes total */
-		/* Later, support for more textures was added, which requires 2 bytes per texture */
-		/*  For backwards compatibility, the lower byte of each texture is */
-		/*  written into first 6 bytes, then higher byte into next 6 bytes */
-		tex = Block_Tex(b, FACE_YMAX); tmp[68] = (cc_uint8)tex; tmp[74] = (cc_uint8)(tex >> 8);
-		tex = Block_Tex(b, FACE_YMIN); tmp[69] = (cc_uint8)tex; tmp[75] = (cc_uint8)(tex >> 8);
-		tex = Block_Tex(b, FACE_XMIN); tmp[70] = (cc_uint8)tex; tmp[76] = (cc_uint8)(tex >> 8);
-		tex = Block_Tex(b, FACE_XMAX); tmp[71] = (cc_uint8)tex; tmp[77] = (cc_uint8)(tex >> 8);
-		tex = Block_Tex(b, FACE_ZMIN); tmp[72] = (cc_uint8)tex; tmp[78] = (cc_uint8)(tex >> 8);
-		tex = Block_Tex(b, FACE_ZMAX); tmp[73] = (cc_uint8)tex; tmp[79] = (cc_uint8)(tex >> 8);
+		/*  Later, support for more textures was added, which requires 2 bytes per texture */
+		/*   For backwards compatibility, the lower byte of each texture is */
+		/*   written into first 6 bytes, then higher byte into next 6 bytes (ugly hack) */
+		cur = Nbt_WriteArray(cur, "Textures", 12);
+		tex = Block_Tex(b, FACE_YMAX); cur[0] = (cc_uint8)tex; cur[ 6] = (cc_uint8)(tex >> 8);
+		tex = Block_Tex(b, FACE_YMIN); cur[1] = (cc_uint8)tex; cur[ 7] = (cc_uint8)(tex >> 8);
+		tex = Block_Tex(b, FACE_XMIN); cur[2] = (cc_uint8)tex; cur[ 8] = (cc_uint8)(tex >> 8);
+		tex = Block_Tex(b, FACE_XMAX); cur[3] = (cc_uint8)tex; cur[ 9] = (cc_uint8)(tex >> 8);
+		tex = Block_Tex(b, FACE_ZMIN); cur[4] = (cc_uint8)tex; cur[10] = (cc_uint8)(tex >> 8);
+		tex = Block_Tex(b, FACE_ZMAX); cur[5] = (cc_uint8)tex; cur[11] = (cc_uint8)(tex >> 8);
+		cur += 12;
 
-		tmp[97]  = Blocks.BlocksLight[b] ? 0 : 1;
-		tmp[110] = Blocks.DigSounds[b];
-		tmp[124] = Blocks.FullBright[b] ? 1 : 0;
-		tmp[133] = sprite ? 0 : (cc_uint8)(Blocks.MaxBB[b].Y * 16);
-		tmp[146] = sprite ? Blocks.SpriteOffset[b] : Blocks.Draw[b];
+		cur  = Nbt_WriteUInt8(cur,  "TransmitsLight", Blocks.BlocksLight[b] ? 0 : 1);
+		cur  = Nbt_WriteUInt8(cur,  "WalkSound",      Blocks.DigSounds[b]);
+		cur  = Nbt_WriteUInt8(cur,  "FullBright",     Blocks.FullBright[b] ? 1 : 0);
+		cur  = Nbt_WriteUInt8(cur,  "Shape",          sprite ? 0 : (cc_uint8)(Blocks.MaxBB[b].Y * 16));
+		cur  = Nbt_WriteUInt8(cur,  "BlockDraw",      sprite ? Blocks.SpriteOffset[b] : Blocks.Draw[b]);
 
+		cur = Nbt_WriteArray(cur, "Fog", 4);
 		fog = (cc_uint8)(128 * Blocks.FogDensity[b] - 1);
 		col = Blocks.FogCol[b];
-		tmp[157] = Blocks.FogDensity[b] ? fog : 0;
-		tmp[158] = PackedCol_R(col); tmp[159] = PackedCol_G(col); tmp[160] = PackedCol_B(col);
+		cur[0] = Blocks.FogDensity[b] ? fog : 0;
+		cur[1] = PackedCol_R(col); cur[2] = PackedCol_G(col); cur[3] = PackedCol_B(col);
+		cur += 4;
 
-		minBB = Blocks.MinBB[b]; maxBB = Blocks.MaxBB[b];
-		tmp[174] = (cc_uint8)(minBB.X * 16); tmp[175] = (cc_uint8)(minBB.Y * 16); tmp[176] = (cc_uint8)(minBB.Z * 16);
-		tmp[177] = (cc_uint8)(maxBB.X * 16); tmp[178] = (cc_uint8)(maxBB.Y * 16); tmp[179] = (cc_uint8)(maxBB.Z * 16);
-	}
+		cur  = Nbt_WriteArray(cur,  "Coords", 6);
+		minBB  = Blocks.MinBB[b]; maxBB = Blocks.MaxBB[b];
+		cur[0] = (cc_uint8)(minBB.X * 16); cur[1] = (cc_uint8)(minBB.Y * 16); cur[2] = (cc_uint8)(minBB.Z * 16);
+		cur[3] = (cc_uint8)(maxBB.X * 16); cur[4] = (cc_uint8)(maxBB.Y * 16); cur[5] = (cc_uint8)(maxBB.Z * 16);
+		cur += 6;
 
-	name = Block_UNSAFE_GetName(b);
-	len  = Cw_WriteEndString(&tmp[187], &name);
-	return Stream_Write(stream, tmp, sizeof(cw_meta_def) + len);
+		name = Block_UNSAFE_GetName(b);
+		cur  = Nbt_WriteString(cur, "Name", &name);
+	} *cur++ = NBT_END;
+
+	return Stream_Write(stream, buffer, (int)(cur - buffer));
 }
 
 cc_result Cw_Save(struct Stream* stream) {
-	cc_uint8 tmp[768];
-	PackedCol col;
+	cc_uint8 buffer[2048];
+	cc_uint8* cur;
 	struct LocalPlayer* p = &LocalPlayer_Instance;
 	cc_result res;
-	int b, len;
+	int b;
 
-	Mem_Copy(tmp, cw_begin, sizeof(cw_begin));
+	cur = buffer;
+	cur = Nbt_WriteDict(cur,   "ClassicWorld");
+	cur = Nbt_WriteUInt8(cur,  "FormatVersion", 1);
+	cur = Nbt_WriteArray(cur,  "UUID", WORLD_UUID_LEN); Mem_Copy(cur, World.Uuid, WORLD_UUID_LEN); cur += WORLD_UUID_LEN;
+	cur = Nbt_WriteUInt16(cur, "X", World.Width);
+	cur = Nbt_WriteUInt16(cur, "Y", World.Height);
+	cur = Nbt_WriteUInt16(cur, "Z", World.Length);
+
+	cur = Nbt_WriteDict(cur, "MapGenerator");
 	{
-		Mem_Copy(&tmp[43], World.Uuid, WORLD_UUID_LEN);
-		Stream_SetU16_BE(&tmp[63], World.Width);
-		Stream_SetU16_BE(&tmp[69], World.Height);
-		Stream_SetU16_BE(&tmp[75], World.Length);
-		Stream_SetU32_BE(&tmp[127], World.Volume);
-		
-		/* TODO: Maybe keep real spawn too? */
-		Stream_SetU16_BE(&tmp[89],  (cc_uint16)p->Base.Position.X);
-		Stream_SetU16_BE(&tmp[95],  (cc_uint16)p->Base.Position.Y);
-		Stream_SetU16_BE(&tmp[101], (cc_uint16)p->Base.Position.Z);
-		tmp[107] = Math_Deg2Packed(p->SpawnYaw);
-		tmp[112] = Math_Deg2Packed(p->SpawnPitch);
-	}
-	if ((res = Stream_Write(stream, tmp,      sizeof(cw_begin)))) return res;
-	if ((res = Stream_Write(stream, World.Blocks, World.Volume))) return res;
+		cur  = Nbt_WriteInt32(cur, "Seed", World.Seed);
+	} *cur++ = NBT_END;
+	
 
+	/* TODO: Maybe keep real spawn too? */
+	cur = Nbt_WriteDict(cur, "Spawn");
+	{
+		cur  = Nbt_WriteUInt16(cur, "X", (cc_uint16)p->Base.Position.X);
+		cur  = Nbt_WriteUInt16(cur, "Y", (cc_uint16)p->Base.Position.Y);
+		cur  = Nbt_WriteUInt16(cur, "Z", (cc_uint16)p->Base.Position.Z);
+		cur  = Nbt_WriteUInt8(cur,  "H", Math_Deg2Packed(p->SpawnYaw));
+		cur  = Nbt_WriteUInt8(cur,  "P", Math_Deg2Packed(p->SpawnPitch));
+	} *cur++ = NBT_END;
+	cur = Nbt_WriteArray(cur, "BlockArray", World.Volume);
+
+	if ((res = Stream_Write(stream, buffer, (int)(cur - buffer)))) return res;
+	if ((res = Stream_Write(stream, World.Blocks, World.Volume)))  return res;
+
+#ifdef EXTENDED_BLOCKS
 	if (World.Blocks != World.Blocks2) {
-		Mem_Copy(tmp, cw_map2, sizeof(cw_map2));
-		Stream_SetU32_BE(&tmp[14], World.Volume);
+		cur = buffer;
+		cur = Nbt_WriteArray(cur, "BlockArray2", World.Volume);
 
-		if ((res = Stream_Write(stream, tmp,        sizeof(cw_map2)))) return res;
+		if ((res = Stream_Write(stream, buffer, (int)(cur - buffer)))) return res;
 		if ((res = Stream_Write(stream, World.Blocks2, World.Volume))) return res;
 	}
+#endif
 
-	Mem_Copy(tmp, cw_meta_cpe, sizeof(cw_meta_cpe));
+	cur = buffer;
+	cur = Nbt_WriteDict(cur, "Metadata");
+	cur = Nbt_WriteDict(cur, "CPE");
 	{
-		Stream_SetU16_BE(&tmp[44], (cc_uint16)(LocalPlayer_Instance.ReachDistance * 32));
-		tmp[78] = Env.Weather;
+		cur = Nbt_WriteDict(cur, "ClickDistance");
+		{
+			cur  = Nbt_WriteUInt16(cur, "Distance", (cc_uint16)(LocalPlayer_Instance.ReachDistance * 32));
+		} *cur++ = NBT_END;
 
-		col = Env.SkyCol;    tmp[103] = PackedCol_R(col); tmp[109] = PackedCol_G(col); tmp[115] = PackedCol_B(col);
-		col = Env.CloudsCol; tmp[130] = PackedCol_R(col); tmp[136] = PackedCol_G(col); tmp[142] = PackedCol_B(col);
-		col = Env.FogCol;    tmp[155] = PackedCol_R(col); tmp[161] = PackedCol_G(col); tmp[167] = PackedCol_B(col);
-		col = Env.ShadowCol; tmp[184] = PackedCol_R(col); tmp[190] = PackedCol_G(col); tmp[196] = PackedCol_B(col);
-		col = Env.SunCol;    tmp[214] = PackedCol_R(col); tmp[220] = PackedCol_G(col); tmp[226] = PackedCol_B(col);
+		cur = Nbt_WriteDict(cur, "EnvWeatherType");
+		{
+			cur  = Nbt_WriteUInt8(cur, "WeatherType", Env.Weather);
+		} *cur++ = NBT_END;
 
-		tmp[260] = (BlockRaw)Env.SidesBlock;
-		tmp[273] = (BlockRaw)Env.EdgeBlock;
-		Stream_SetU16_BE(&tmp[286], Env.EdgeHeight);
-	}
-	len = Cw_WriteEndString(&tmp[301], &TexturePack_Url);
-	if ((res = Stream_Write(stream, tmp, sizeof(cw_meta_cpe) + len))) return res;
+		cur = Nbt_WriteDict(cur, "EnvColors");
+		{
+			cur = Cw_WriteColor(cur, "Sky",      Env.SkyCol);
+			cur = Cw_WriteColor(cur, "Cloud",    Env.CloudsCol);
+			cur = Cw_WriteColor(cur, "Fog",      Env.FogCol);
+			cur = Cw_WriteColor(cur, "Ambient",  Env.ShadowCol);
+			cur = Cw_WriteColor(cur, "Sunlight", Env.SunCol);
+			cur = Cw_WriteColor(cur, "Skybox",   Env.SkyboxCol);
+		} *cur++ = NBT_END;
 
-	if ((res = Stream_Write(stream, cw_meta_defs, sizeof(cw_meta_defs)))) return res;
-	/* Write block definitions in reverse order so that software that only reads byte 'ID' */
-	/* still loads correct first 256 block defs when saving a map with over 256 block defs */
-	for (b = BLOCK_MAX_DEFINED; b >= 1; b--) {
-		if (!Block_IsCustomDefined(b)) continue;
-		if ((res = Cw_WriteBockDef(stream, b))) return res;
+		cur = Nbt_WriteDict(cur, "EnvMapAppearance");
+		{
+			cur  = Nbt_WriteUInt8(cur, "SideBlock", (BlockRaw)Env.SidesBlock);
+			cur  = Nbt_WriteUInt8(cur, "EdgeBlock", (BlockRaw)Env.EdgeBlock);
+			cur  = Nbt_WriteUInt16(cur, "SideLevel", Env.EdgeHeight);
+			cur  = Nbt_WriteString(cur, "TextureURL", &TexturePack_Url);
+		} *cur++ = NBT_END;
+
+		cur = Nbt_WriteDict(cur, "EnvMapAspect");
+		{
+			cur  = Nbt_WriteUInt16(cur, "EdgeBlock",    Env.EdgeBlock);
+			cur  = Nbt_WriteUInt16(cur, "SideBlock",    Env.SidesBlock);
+			cur  = Nbt_WriteInt32(cur,  "EdgeHeight",   Env.EdgeHeight);
+			cur  = Nbt_WriteInt32(cur,  "SidesOffset",  Env.SidesOffset);
+			cur  = Nbt_WriteInt32(cur,  "CloudsHeight", Env.CloudsHeight);
+			cur  = Nbt_WriteFloat(cur,  "CloudsSpeed",  Env.CloudsSpeed);
+			cur  = Nbt_WriteFloat(cur,  "WeatherSpeed", Env.WeatherSpeed);
+			cur  = Nbt_WriteFloat(cur,  "WeatherFade",  Env.WeatherFade);
+			cur  = Nbt_WriteUInt8(cur,  "ExpFog",       (cc_uint8)Env.ExpFog);
+			cur  = Nbt_WriteFloat(cur,  "SkyboxHor",    Env.SkyboxHorSpeed);
+			cur  = Nbt_WriteFloat(cur,  "SkyboxVer",    Env.SkyboxVerSpeed);
+		} *cur++ = NBT_END;
+
+		cur = Nbt_WriteDict(cur, "BlockDefinitions");
+		if ((res = Stream_Write(stream, buffer, (int)(cur - buffer)))) return res;
+
+		{
+			/* Write block definitions in reverse order so that software that only reads byte 'ID' */
+			/* still loads correct first 256 block defs when saving a map with over 256 block defs */
+			for (b = BLOCK_MAX_DEFINED; b >= 1; b--) {
+				if (!Block_IsCustomDefined(b)) continue;
+				if ((res = Cw_WriteBockDef(stream, b))) return res;
+			}
+		}
 	}
 	return Stream_Write(stream, cw_end, sizeof(cw_end));
 }
@@ -1155,8 +1542,7 @@ cc_result Cw_Save(struct Stream* stream) {
 /*########################################################################################################################*
 *---------------------------------------------------Schematic export------------------------------------------------------*
 *#########################################################################################################################*/
-
-static cc_uint8 sc_begin[78] = {
+static cc_uint8 sc_begin[] = {
 NBT_DICT, 0,9, 'S','c','h','e','m','a','t','i','c',
 	NBT_STR,  0,9,  'M','a','t','e','r','i','a','l','s', 0,7, 'C','l','a','s','s','i','c',
 	NBT_I16,  0,5,  'W','i','d','t','h',                 0,0,
@@ -1164,10 +1550,10 @@ NBT_DICT, 0,9, 'S','c','h','e','m','a','t','i','c',
 	NBT_I16,  0,6,  'L','e','n','g','t','h',             0,0,
 	NBT_I8S,  0,6,  'B','l','o','c','k','s',             0,0,0,0,
 };
-static cc_uint8 sc_data[11] = {
+static cc_uint8 sc_data[] = {
 	NBT_I8S,  0,4,  'D','a','t','a',                     0,0,0,0,
 };
-static cc_uint8 sc_end[37] = {
+static cc_uint8 sc_end[] = {
 	NBT_LIST, 0,8,  'E','n','t','i','t','i','e','s',                 NBT_DICT, 0,0,0,0,
 	NBT_LIST, 0,12, 'T','i','l','e','E','n','t','i','t','i','e','s', NBT_DICT, 0,0,0,0,
 NBT_END,
@@ -1199,4 +1585,133 @@ cc_result Schematic_Save(struct Stream* stream) {
 		if ((res = Stream_Write(stream, chunk, count))) return res;
 	}
 	return Stream_Write(stream, sc_end, sizeof(sc_end));
+}
+
+
+/*########################################################################################################################*
+*------------------------------------------------------Dat export---------------------------------------------------------*
+*#########################################################################################################################*/
+static const struct JField {
+	cc_uint8 type, isFloat;
+	const char* name;
+	void* value;
+} level_fields[] = {
+	{ JFIELD_I32, false, "width",  &World.Width  },
+	{ JFIELD_I32, false, "depth",  &World.Height },
+	{ JFIELD_I32, false, "height", &World.Length },
+	{ JFIELD_I32, true,  "xSpawn", &LocalPlayer_Instance.Base.Position.X },
+	{ JFIELD_I32, true,  "ySpawn", &LocalPlayer_Instance.Base.Position.Y },
+	{ JFIELD_I32, true,  "zSpawn", &LocalPlayer_Instance.Base.Position.Z },
+	{ JFIELD_ARRAY,0, "blocks" }
+	/* TODO classic only blocks */
+};
+
+static int WriteJavaString(cc_uint8* dst, const char* value) {
+	int length = String_Length(value);
+	dst[0] = 0;
+	dst[1] = length;
+	Mem_Copy(dst + 2, value, length);
+	return length;
+}
+
+static cc_result WriteClassDesc(struct Stream* stream, cc_uint8 typecode, const char* klass, 
+								int numFields, const struct JField* fields) {
+	cc_uint8 header[256] = { 0 };
+	static const cc_uint8 footer[] = {
+		TC_ENDBLOCKDATA, /* classAnnotations */
+		TC_NULL          /* superClassDesc */
+	};
+	int i, length;
+	cc_result res;
+
+	header[0] = typecode;
+	header[1] = TC_CLASSDESC;
+	length    = WriteJavaString(header + 2, klass);
+	header[4 + length +  8] = SC_SERIALIZABLE;
+	header[4 + length +  9] = 0;
+	header[4 + length + 10] = numFields;
+
+	if ((res = Stream_Write(stream, header, 15 + length))) return res;
+
+	for (i = 0; i < numFields; i++) 
+	{
+		header[0] = fields[i].type;
+		length    = WriteJavaString(header + 1, fields[i].name);
+
+		if (fields[i].type == JFIELD_ARRAY) {
+			header[3 + length + 0] = TC_STRING;
+			WriteJavaString(&header[3 + length + 1], "[B");
+			length += 5;
+		}
+		if ((res = Stream_Write(stream, header, 3 + length))) return res;
+	}
+
+	if ((res = Stream_Write(stream, footer, sizeof(footer)))) return res;
+	return 0;
+}
+
+static const cc_uint8 cpe_fallback[] = {
+	BLOCK_SLAB, BLOCK_BROWN_SHROOM, BLOCK_SAND, BLOCK_AIR, BLOCK_STILL_LAVA, BLOCK_PINK,
+	BLOCK_GREEN, BLOCK_DIRT, BLOCK_BLUE, BLOCK_CYAN, BLOCK_GLASS, BLOCK_IRON, BLOCK_OBSIDIAN, BLOCK_WHITE,
+	BLOCK_WOOD, BLOCK_STONE
+};
+
+#define DAT_BUFFER_SIZE (64 * 1024)
+static cc_result WriteLevelBlocks(struct Stream* stream) {
+	cc_uint8 buffer[DAT_BUFFER_SIZE];
+	int i, bIndex = 0;
+	cc_result res;
+	BlockID b;
+
+	for (i = 0; i < World.Volume; i++)
+	{
+		b = World_GetRawBlock(i);
+		/* TODO: Better fallback decision (e.g. air if custom block is 'gas' type) */
+		if (b > BLOCK_STONE_BRICK) b = BLOCK_STONE;
+		/* TODO: Move to GameVersion.c and account for game version */
+		if (b > BLOCK_OBSIDIAN) b = cpe_fallback[b - BLOCK_COBBLE_SLAB];
+
+		buffer[bIndex] = (cc_uint8)b;
+		bIndex++;
+		if (bIndex < DAT_BUFFER_SIZE) continue;
+
+		if ((res = Stream_Write(stream, buffer, DAT_BUFFER_SIZE))) return res;
+		bIndex = 0;
+	}
+
+	if (bIndex == 0) return 0;
+	return Stream_Write(stream, buffer, bIndex);
+}
+
+cc_result Dat_Save(struct Stream* stream) {
+	static const cc_uint8 header[] = {
+		0x27,0x1B,0xB7,0x88, 0x02, /* DAT signature + version */
+		0xAC,0xED, 0x00,0x05       /* JSF signature + version */
+	};
+	const struct JField* field;
+	cc_uint8 tmp[4];
+	cc_result res;
+	int i, value;
+
+	if ((res = Stream_Write(stream, header, sizeof(header)))) return res;
+	if ((res = WriteClassDesc(stream, TC_OBJECT, "com.mojang.minecraft.level.Level", 
+					Array_Elems(level_fields), level_fields))) return res;
+
+	/* Write field values */
+	for (i = 0; i < Array_Elems(level_fields); i++) 
+	{
+		field = &level_fields[i];
+
+		if (field->type == JFIELD_I32) {
+			value = field->isFloat ? *((float*)field->value) : *((int*)field->value);
+			Stream_SetU32_BE(tmp, value);
+			if ((res = Stream_Write(stream, tmp, 4))) return res;
+		} else {
+			if ((res = WriteClassDesc(stream, TC_ARRAY, "[B", 0, NULL)))  return res;
+			Stream_SetU32_BE(tmp, World.Volume);
+			if ((res = Stream_Write(stream, tmp, 4))) return res;
+			if ((res = WriteLevelBlocks(stream)))     return res;
+		}
+	}
+	return 0;
 }

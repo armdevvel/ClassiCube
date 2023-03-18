@@ -10,6 +10,7 @@
 #include "PackedCol.h"
 #include "Errors.h"
 #include "Utils.h"
+#include "Http.h"
 
 /*########################################################################################################################*
 *----------------------------------------------------------JSON-----------------------------------------------------------*
@@ -211,29 +212,23 @@ static void LWebTask_Reset(struct LWebTask* task) {
 	task->completed = false;
 	task->working   = true;
 	task->success   = false;
-	task->res       = 0;
-	task->status    = 0;
 }
 
-void LWebTask_Tick(struct LWebTask* task) {
-	struct HttpRequest req;
+void LWebTask_Tick(struct LWebTask* task, LWebTask_ErrorCallback errorCallback) {
+	struct HttpRequest item;
 	if (task->completed) return;
-	if (!Http_GetResult(task->reqID, &req)) return;
-
-	task->res    = req.result;
-	task->status = req.statusCode;
+	if (!Http_GetResult(task->reqID, &item)) return;
 
 	task->working   = false;
 	task->completed = true;
-	task->success   = req.success;
+	task->success   = item.success;
 
-	if (!req.success) return;
-	task->Handle((cc_uint8*)req.data, req.size);
-	Mem_Free(req.data);
-}
-
-void LWebTask_DisplayError(struct LWebTask* task, const char* action, cc_string* dst) {
-	Launcher_DisplayHttpError(task->res, task->status, action, dst);
+	if (item.success) {
+		task->Handle(item.data, item.size);
+	} else if (errorCallback) {
+		errorCallback(&item);
+	}
+	HttpRequest_Free(&item);
 }
 
 void LWebTasks_Init(void) {
@@ -276,7 +271,7 @@ void GetTokenTask_Run(void) {
 	GetTokenTask.error = false;
 
 	GetTokenTask.Base.Handle = GetTokenTask_Handle;
-	GetTokenTask.Base.reqID  = Http_AsyncGetDataEx(&url, false, NULL, NULL, &ccCookies);
+	GetTokenTask.Base.reqID  = Http_AsyncGetDataEx(&url, 0, NULL, NULL, &ccCookies);
 }
 
 
@@ -343,7 +338,7 @@ void SignInTask_Run(const cc_string* user, const cc_string* pass, const cc_strin
 	SignInTask_Append(&args, "&login_code=", mfaCode);
 
 	SignInTask.Base.Handle = SignInTask_Handle;
-	SignInTask.Base.reqID  = Http_AsyncPostData(&url, false, args.buffer, args.length, &ccCookies);
+	SignInTask.Base.reqID  = Http_AsyncPostData(&url, 0, args.buffer, args.length, &ccCookies);
 }
 
 
@@ -416,7 +411,7 @@ void FetchServerTask_Run(const cc_string* hash) {
 	String_Format2(&url, "%s/server/%s", &servicesServer, hash);
 
 	FetchServerTask.Base.Handle = FetchServerTask_Handle;
-	FetchServerTask.Base.reqID  = Http_AsyncGetDataEx(&url, false, NULL, NULL, &ccCookies);
+	FetchServerTask.Base.reqID  = Http_AsyncGetDataEx(&url, 0, NULL, NULL, &ccCookies);
 }
 
 
@@ -472,7 +467,7 @@ void FetchServersTask_Run(void) {
 	String_Format1(&url, "%s/servers", &servicesServer);
 
 	FetchServersTask.Base.Handle = FetchServersTask_Handle;
-	FetchServersTask.Base.reqID  = Http_AsyncGetDataEx(&url, false, NULL, NULL, &ccCookies);
+	FetchServersTask.Base.reqID  = Http_AsyncGetDataEx(&url, 0, NULL, NULL, &ccCookies);
 }
 
 void FetchServersTask_ResetOrder(void) {
@@ -522,7 +517,7 @@ void CheckUpdateTask_Run(void) {
 	String_InitArray(CheckUpdateTask.latestRelease, relVersionBuffer);
 
 	CheckUpdateTask.Base.Handle = CheckUpdateTask_Handle;
-	CheckUpdateTask.Base.reqID  = Http_AsyncGetData(&url, false);
+	CheckUpdateTask.Base.reqID  = Http_AsyncGetData(&url, 0);
 }
 
 
@@ -548,18 +543,18 @@ static void FetchUpdateTask_Handle(cc_uint8* data, cc_uint32 len) {
 #endif
 }
 
-void FetchUpdateTask_Run(cc_bool release, cc_bool d3d9) {
+void FetchUpdateTask_Run(cc_bool release, int buildIndex) {
 	cc_string url; char urlBuffer[URL_MAX_SIZE];
 	String_InitArray(url, urlBuffer);
 
 	String_Format2(&url, UPDATES_SERVER "/%c/%c",
-		release ? "release"    : "latest",
-		d3d9    ? Updater_D3D9 : Updater_OGL);
+		release ? "release" : "latest",
+		Updater_Info.builds[buildIndex].path);
 
 	LWebTask_Reset(&FetchUpdateTask.Base);
 	FetchUpdateTask.timestamp   = release ? CheckUpdateTask.relTimestamp : CheckUpdateTask.devTimestamp;
 	FetchUpdateTask.Base.Handle = FetchUpdateTask_Handle;
-	FetchUpdateTask.Base.reqID  = Http_AsyncGetData(&url, false);
+	FetchUpdateTask.Base.reqID  = Http_AsyncGetData(&url, 0);
 }
 
 
@@ -569,10 +564,6 @@ void FetchUpdateTask_Run(cc_bool release, cc_bool d3d9) {
 struct FetchFlagsData FetchFlagsTask;
 static int flagsCount, flagsCapacity;
 
-struct Flag {
-	struct Bitmap bmp;
-	char country[2];
-};
 static struct Flag* flags;
 
 /* Scales up flag bitmap if necessary */
@@ -595,14 +586,16 @@ static void FetchFlagsTask_Scale(struct Bitmap* bmp) {
 
 static void FetchFlagsTask_DownloadNext(void);
 static void FetchFlagsTask_Handle(cc_uint8* data, cc_uint32 len) {
+	struct Flag* flag = &flags[FetchFlagsTask.count];
 	struct Stream s;
 	cc_result res;
 
 	Stream_ReadonlyMemory(&s, data, len);
-	res = Png_Decode(&flags[FetchFlagsTask.count].bmp, &s);
+	res = Png_Decode(&flag->bmp, &s);
 	if (res) Logger_SysWarn(res, "decoding flag");
+	flag->meta = NULL;
 
-	FetchFlagsTask_Scale(&flags[FetchFlagsTask.count].bmp);
+	FetchFlagsTask_Scale(&flag->bmp);
 	FetchFlagsTask.count++;
 	FetchFlagsTask_DownloadNext();
 }
@@ -619,7 +612,7 @@ static void FetchFlagsTask_DownloadNext(void) {
 			&flags[FetchFlagsTask.count].country[0], &flags[FetchFlagsTask.count].country[1]);
 
 	FetchFlagsTask.Base.Handle = FetchFlagsTask_Handle;
-	FetchFlagsTask.Base.reqID  = Http_AsyncGetData(&url, false);
+	FetchFlagsTask.Base.reqID  = Http_AsyncGetData(&url, 0);
 }
 
 static void FetchFlagsTask_Ensure(void) {
@@ -651,12 +644,12 @@ void FetchFlagsTask_Add(const struct ServerInfo* server) {
 	FetchFlagsTask_DownloadNext();
 }
 
-struct Bitmap* Flags_Get(const struct ServerInfo* server) {
+struct Flag* Flags_Get(const struct ServerInfo* server) {
 	int i;
 	for (i = 0; i < FetchFlagsTask.count; i++) {
 		if (flags[i].country[0] != server->country[0]) continue;
 		if (flags[i].country[1] != server->country[1]) continue;
-		return &flags[i].bmp;
+		return &flags[i];
 	}
 	return NULL;
 }
