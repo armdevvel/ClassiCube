@@ -1,137 +1,90 @@
-name: Build
+name: ARM32 Windows Build
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 jobs:
   build_on_ubuntu:
-    name: Build ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit) on Ubuntu
+    name: Cross Compile for ${{ matrix.config.plat }} (${{ matrix.config.arch }}${{ matrix.config.bits }}) on Ubuntu
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
         config:
-          - { plat: "Linux", bits: 64 }
-          - { plat: "Linux", bits: 32 }
-          - { plat: "Windows", bits: 64 }
-          - { plat: "Windows", bits: 32 }
+          - { plat: "Windows", bits: 32, arch: "ARM" }
 
     steps:
       - uses: actions/checkout@v2
-
-      - name: Install Shared Dependencies
+      
+      # Dependencies
+      - name: Install Dependencies for MXE
         run: |
-          sudo apt-get -y update &&
-          sudo apt-get -y install build-essential
+            sudo apt-get -y update \
+            && sudo apt-get -y install autoconf automake autopoint bash bison bzip2 flex g++ g++-multilib gettext git gperf intltool libc6-dev-i386 libgdk-pixbuf2.0-dev libltdl-dev libgl-dev libssl-dev libtool-bin libxml-parser-perl lzip make openssl p7zip-full patch perl python3 python3-mako python3-pkg-resources ruby sed unzip wget xz-utils
 
-      # Install platform specific dependencies
-      - name: Install Dependencies for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Linux' && matrix.config.bits == 64
+      - name: Set Up ARM32 MXE
         run: |
-          sudo apt-get -y install libx11-dev libxi-dev libgl1-mesa-dev
+          cd $HOME
+          git clone https://github.com/armdevvel/mxe-SHARED --depth 1 armmxe-shared
+          cd armmxe-shared
+          make DFEAULT_MAX_JOBS=8 llvm-mingw
 
-      - name: Install Dependencies for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Linux' && matrix.config.bits == 32
+      # Build pre-requisites
+      - name: Add ARM32 MXE to PATH
         run: |
-          sudo dpkg --add-architecture i386 \
-            && sudo apt-get -y update \
-            && sudo apt-get -y install gcc-multilib libx11-dev:i386 libxi-dev:i386 libgl1-mesa-dev:i386
-
-      - name: Install Dependencies for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Windows' && matrix.config.bits == 64
-        run: |
-          sudo apt-get -y install gcc-mingw-w64-x86-64
-
-      - name: Install Dependencies for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Windows' && matrix.config.bits == 32
-        run: |
-          sudo apt-get -y install gcc-mingw-w64-i686
+          echo "${HOME}/armmxe-shared/usr/bin" >> $GITHUB_PATH
 
       # Build
-      - name: Build for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Linux' && matrix.config.bits == 64
+      - name: Build ClassiCube for ${{ matrix.config.plat }} (${{ matrix.config.arch }}${{ matrix.config.bits }})
         run: |
+          cd ${{ github.workspace }}
           cd src
-          make linux
+          make mingw CC="armv7-w64-mingw32-gcc"
 
-      - name: Build for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Linux' && matrix.config.bits == 32
+      # Set up folder for release
+      - name: Set Up Folder with EXE and Depedencies for Release
         run: |
-          cd src
-          # Note, this overwrites the previous flags
-          make linux CFLAGS="-m32" LDFLAGS="-m32"
+          cd ${{ github.workspace }}
+          mkdir -p ${{ github.workspace }}/release/ClassiCube
+          cd ${{ github.workspace }}/release
+          cp ${{ github.workspace }}/src/ClassiCube.exe ClassiCube
+          cp $HOME/armmxe-shared/usr/armv7-w64-mingw32/bin/libc++.dll ClassiCube
+          cp $HOME/armmxe-shared/usr/armv7-w64-mingw32/bin/libssp-0.dll ClassiCube
+          cp $HOME/armmxe-shared/usr/armv7-w64-mingw32/bin/libunwind.dll ClassiCube
+          cp $HOME/armmxe-shared/usr/armv7-w64-mingw32/bin/libwinpthread-1.dll ClassiCube
+          cd ${{ github.workspace }}
+          
+      # Get short SHA
+      - name: Get Short SHA
+        run: echo "SHORT_SHA=`git rev-parse --short HEAD`" >> $GITHUB_ENV
+          
+      # Create ZIP
+      - name: Create ZIP with Release
+        uses: vimtor/action-zip@v1
+        with:
+          files: release/
+          dest: ClassiCube-${{ env.SHORT_SHA }}.zip
+      
+      # Create release
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.SHORT_SHA }}
+          release_name: ClassiCube Release ${{ env.SHORT_SHA }} (${{ matrix.config.plat }} ${{ matrix.config.arch }}${{ matrix.config.bits }})
+          draft: false
+          prerelease: false
 
-      - name: Build for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Windows' && matrix.config.bits == 64
-        run: |
-          cd src
-          make mingw CC="x86_64-w64-mingw32-gcc"
-
-      - name: Build for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Windows' && matrix.config.bits == 32
-        run: |
-          cd src
-          make mingw CC="i686-w64-mingw32-gcc"
-
-  build_on_windows:
-    name: Build ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit) on Windows
-    runs-on: windows-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - { plat: "Windows", bits: 64 }
-          - { plat: "Windows", bits: 32 }
-
-    steps:
-      - uses: actions/checkout@v2
-
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v1.1
-
-      # Build
-      - name: Build for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Windows' && matrix.config.bits == 64
-        run: |
-          msbuild src\ClassiCube.vcxproj `
-            -property:Configuration=Debug -property:Platform=x64 `
-            -property:WindowsTargetPlatformVersion=10 -property:PlatformToolset=v142
-
-      - name: Build for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Windows' && matrix.config.bits == 32
-        run: |
-          msbuild src\ClassiCube.vcxproj `
-            -property:Configuration=Debug -property:Platform=Win32 `
-            -property:WindowsTargetPlatformVersion=10 -property:PlatformToolset=v142
-
-  build_on_mac:
-    name: Build ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit) on Mac
-    runs-on: macOS-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - { plat: "Mac", bits: 64 }
-          # "ld: warning: ignoring file ..., missing required architecture i386 in file ..."
-          # "Undefined symbols for architecture i386"
-          # - { plat: "Mac", bits: 32 }
-
-    steps:
-      - uses: actions/checkout@v2
-
-      # Build
-      - name: Build for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Mac' && matrix.config.bits == 64
-        run: |
-          cd src
-          # fix for "error: implicit declaration of function 'CGDisplayBitsPerPixel'"
-          sed -i '' 's|#include <Cocoa/Cocoa.h>|&\'$'\nextern size_t CGDisplayBitsPerPixel(CGDirectDisplayID display);|' interop_cocoa.m
-          make mac_x64
-
-      - name: Build for ${{ matrix.config.plat }} (${{ matrix.config.bits }} bit)
-        if: matrix.config.plat == 'Mac' && matrix.config.bits == 32
-        run: |
-          cd src
-          make mac_x32
+      # Upload release
+      - name: Upload Release Asset
+        id: upload-release-asset 
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ClassiCube-${{ env.SHORT_SHA }}.zip
+          asset_name: ClassiCube-${{ env.SHORT_SHA }}.zip
+          asset_content_type: application/zip
