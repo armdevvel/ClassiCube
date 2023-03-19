@@ -1,3 +1,26 @@
+# ClassiCube - for Windows on ARM32
+
+ClassiCube is a custom Minecraft Classic and ClassiCube client written in C that works COMPLETELY on WoA32 without ANY ISSUES! Performance will be different for everyone.
+
+## Building
+
+1. Have a cross environment set up for ARM32 Windows ([our MXE repository](https://github.com/armdevvel/mxe-SHARED) is highly recommended) and clone the repository
+	- `git clone https://github.com/armdevvel/ClassiCube --depth=1`
+2. Enter the `src` folder
+3. Run the following:
+	- `make mingw CC="armv7-w64-mingw32-gcc"`
+4. Once it's done compiling, you can run the game on Windows on ARM32 or Aarch64 with the following files in a folder together (assuming you used LLVM-MinGW): `libc++.dll`, `libssp-0.dll`, `libunwind.dll`, `libwinpthread-1.dll`, and last but not least, `ClassiCube.exe`.
+
+## Running
+
+Pre-built ARM32 executables will be in the [Releases](https://github.com/armdevvel/ClassiCube/releases) page.
+
+## Feedback
+
+Never be scared to open an issue if you need to ask a question or something is wrong!
+
+# Original README
+
 ClassiCube is a custom Minecraft Classic and ClassiCube client written in C that works on Windows, macOS, Linux, Android, iOS, FreeBSD, NetBSD, OpenBSD, Solaris, Haiku, and in a web browser.<br>
 **It is not affiliated with (or supported by) Mojang AB, Minecraft, or Microsoft in any way.**
 
